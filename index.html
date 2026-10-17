@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Muro de ofertas</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --fondo: #f2f2f0;
+    --texto: #16181d;
+    --suave: #6b6f78;
+    --linea: #dcdcd8;
+    --pegatina: #ffd400;
+    --pegatina-texto: #16181d;
+    --chollazo: #ff3b30;
+    --boton: #16181d;
+    --boton-texto: #ffffff;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-tg]) {
+      --fondo: #17181b; --texto: #f1f1ef; --suave: #9a9ea6; --linea: #2c2e33;
+      --boton: #f1f1ef; --boton-texto: #17181b; color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--fondo); color: var(--texto);
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--fondo);
+    padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px 8px;
+    border-bottom: 1px solid var(--linea);
+  }
+  h1 {
+    margin: 0; font: 800 30px/1 "Barlow Condensed", "Arial Narrow", sans-serif;
+    letter-spacing: -0.01em;
+  }
+  #estado { margin: 4px 0 10px; color: var(--suave); font-size: 13px; }
+  .filas { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; margin: 0 -14px; padding: 0 14px 4px; }
+  .filas::-webkit-scrollbar { display: none; }
+  .chip {
+    flex: none; border: 1px solid var(--linea); background: transparent; color: var(--texto);
+    border-radius: 999px; padding: 7px 13px; font: inherit; font-size: 14px; cursor: pointer;
+  }
+  .chip[aria-pressed="true"] { background: var(--boton); color: var(--boton-texto); border-color: var(--boton); }
+  .chip:focus-visible, .tarjeta:focus-visible { outline: 3px solid var(--pegatina); outline-offset: 2px; }
+  .orden { margin-top: 8px; font-size: 13px; color: var(--suave); }
+  .orden button { background: none; border: 0; padding: 2px 0; margin-right: 14px; font: inherit; color: var(--suave); cursor: pointer; }
+  .orden button[aria-pressed="true"] { color: var(--texto); font-weight: 600; text-decoration: underline; text-underline-offset: 4px; }
+
+  main { padding: 12px 10px 24px; }
+  .muro { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  @media (min-width: 560px) { .muro { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (min-width: 860px) { .muro { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+
+  .tarjeta {
+    position: relative; display: block; text-decoration: none; color: inherit;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .foto {
+    aspect-ratio: 1; background: #fff; border-radius: 6px; overflow: hidden;
+    display: grid; place-items: center;
+  }
+  .foto img { width: 100%; height: 100%; object-fit: contain; padding: 8%; }
+  .foto .sin { color: #9a9ea6; font-size: 34px; }
+  .tarjeta:active .foto { transform: scale(0.98); transition: transform .08s; }
+  .pegatina {
+    position: absolute; top: -4px; left: -4px; transform: rotate(-6deg);
+    background: var(--pegatina); color: var(--pegatina-texto);
+    font: 800 22px/1 "Barlow Condensed", "Arial Narrow", sans-serif;
+    padding: 5px 8px 4px; border-radius: 3px;
+    box-shadow: 0 1px 0 rgba(0,0,0,.25);
+  }
+  .pegatina.fuego { background: var(--chollazo); color: #fff; }
+  .precio { margin-top: 6px; font: 600 20px/1 "Barlow Condensed", "Arial Narrow", sans-serif; }
+  .titulo {
+    margin-top: 3px; font-size: 13px; color: var(--suave);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .vacio { padding: 40px 10px; text-align: center; color: var(--suave); }
+  .vacio button { margin-top: 12px; }
+  @media (prefers-reduced-motion: reduce) { .tarjeta:active .foto { transform: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ofertas de Amazon</h1>
+  <p id="estado">Cargando ofertas…</p>
+  <div class="filas" id="categorias" role="toolbar" aria-label="Departamentos"></div>
+  <div class="orden" role="group" aria-label="Ordenar">
+    <button type="button" data-orden="descuento" aria-pressed="true">Más descuento</button>
+    <button type="button" data-orden="nuevas" aria-pressed="false">Más nuevas</button>
+    <button type="button" data-orden="precio" aria-pressed="false">Más baratas</button>
+  </div>
+</header>
+<main><div class="muro" id="muro"></div></main>
+
+<script>
+const REPO = "manu3m/chollos-bot";
+const tg = window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData !== undefined
+  ? window.Telegram.WebApp : null;
+
+if (tg) {
+  document.documentElement.setAttribute("data-tg", "");
+  tg.ready(); tg.expand();
+  const t = tg.themeParams || {};
+  const raiz = document.documentElement.style;
+  if (t.bg_color) raiz.setProperty("--fondo", t.secondary_bg_color || t.bg_color);
+  if (t.text_color) { raiz.setProperty("--texto", t.text_color); raiz.setProperty("--boton", t.text_color); }
+  if (t.hint_color) raiz.setProperty("--suave", t.hint_color);
+  if (t.section_separator_color) raiz.setProperty("--linea", t.section_separator_color);
+  if (t.bg_color) raiz.setProperty("--boton-texto", t.bg_color);
+  if (tg.colorScheme === "dark") raiz.setProperty("color-scheme", "dark");
+}
+
+const parametros = new URLSearchParams(location.search);
+const preferidas = (parametros.get("cats") || "").split(",").filter(Boolean);
+let datos = [], categoria = "Todas", orden = "descuento";
+
+function euros(v) {
+  if (v === 0) return "Gratis";
+  return v.toLocaleString("es-ES", { style: "currency", currency: "EUR" });
+}
+function haceCuanto(segundos) {
+  const m = Math.round((Date.now() / 1000 - segundos) / 60);
+  if (m < 1) return "ahora mismo";
+  if (m < 60) return `hace ${m} min`;
+  const h = Math.round(m / 60);
+  return h < 24 ? `hace ${h} h` : `hace ${Math.round(h / 24)} d`;
+}
+function abrir(url) {
+  if (tg && tg.openLink) { tg.openLink(url); return false; }
+  return true;
+}
+
+async function cargar() {
+  // La API de GitHub da el archivo al momento; el enlace "raw" puede ir unos minutos por detrás.
+  try {
+    const r = await fetch(`https://api.github.com/repos/${REPO}/contents/ofertas.json?ref=main`,
+                          { headers: { Accept: "application/vnd.github.raw+json" }, cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    return await r.json();
+  } catch (e) {
+    const r = await fetch(`https://raw.githubusercontent.com/${REPO}/main/ofertas.json?t=${Date.now()}`);
+    if (!r.ok) throw new Error("sin datos");
+    return await r.json();
+  }
+}
+
+function pintarCategorias() {
+  const cuenta = {};
+  datos.forEach(o => cuenta[o.c] = (cuenta[o.c] || 0) + 1);
+  const nombres = Object.keys(cuenta).sort((a, b) => cuenta[b] - cuenta[a]);
+  const fila = document.getElementById("categorias");
+  fila.innerHTML = "";
+  const opciones = ["Todas", ...(preferidas.length ? ["Mis departamentos"] : []), ...nombres];
+  opciones.forEach(n => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "chip";
+    const total = n === "Todas" ? datos.length
+      : n === "Mis departamentos" ? datos.filter(o => preferidas.includes(o.c)).length : cuenta[n];
+    b.textContent = `${n} ${total}`;
+    b.setAttribute("aria-pressed", String(n === categoria));
+    b.onclick = () => { categoria = n; pintarCategorias(); pintar(); window.scrollTo({ top: 0 }); };
+    fila.appendChild(b);
+  });
+}
+
+function pintar() {
+  let lista = datos.filter(o => categoria === "Todas" ? true
+    : categoria === "Mis departamentos" ? preferidas.includes(o.c) : o.c === categoria);
+  const clave = {
+    descuento: (a, b) => (b.d ?? -1) - (a.d ?? -1),
+    nuevas: (a, b) => b.f - a.f,
+    precio: (a, b) => (a.p ?? 1e9) - (b.p ?? 1e9),
+  }[orden];
+  lista = lista.slice().sort(clave);
+  const muro = document.getElementById("muro");
+  muro.innerHTML = "";
+  if (!lista.length) {
+    muro.innerHTML = `<p class="vacio" style="grid-column:1/-1">No hay ofertas en este departamento ahora mismo. Prueba con «Todas».</p>`;
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  lista.forEach(o => {
+    const a = document.createElement("a");
+    a.className = "tarjeta"; a.href = o.u; a.target = "_blank"; a.rel = "noopener";
+    a.onclick = () => abrir(o.u);
+    a.setAttribute("aria-label", `${o.t}${o.p != null ? ", " + euros(o.p) : ""}`);
+    const foto = o.i
+      ? `<img src="${o.i}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'sin',textContent:'🛒'}))">`
+      : `<span class="sin">🛒</span>`;
+    const pegatina = o.d != null
+      ? `<span class="pegatina${o.d >= 95 ? " fuego" : ""}">-${Math.round(o.d)}%</span>` : "";
+    a.innerHTML = `<div class="foto">${foto}</div>${pegatina}`
+      + (o.p != null ? `<div class="precio">${euros(o.p)}</div>` : "")
+      + `<div class="titulo"></div>`;
+    a.querySelector(".titulo").textContent = o.t;
+    frag.appendChild(a);
+  });
+  muro.appendChild(frag);
+}
+
+document.querySelectorAll(".orden button").forEach(b => b.onclick = () => {
+  orden = b.dataset.orden;
+  document.querySelectorAll(".orden button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  pintar();
+});
+
+cargar().then(j => {
+  datos = j.ofertas || [];
+  if (preferidas.length && datos.some(o => preferidas.includes(o.c))) categoria = "Mis departamentos";
+  document.getElementById("estado").textContent =
+    `${datos.length} productos, actualizado ${haceCuanto(j.actualizado)}. Toca uno para abrirlo en Amazon.`;
+  pintarCategorias(); pintar();
+}).catch(() => {
+  document.getElementById("estado").textContent = "No se han podido cargar las ofertas.";
+  document.getElementById("muro").innerHTML =
+    `<div class="vacio" style="grid-column:1/-1">Comprueba tu conexión y vuelve a intentarlo.<br>
+     <button class="chip" type="button" onclick="location.reload()">Reintentar</button></div>`;
+});
+</script>
+</body>
+</html>
