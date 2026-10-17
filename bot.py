@@ -57,7 +57,7 @@ CATEGORIAS = [
     ("Coches y motos", "Coches y motos"),
     ("Otras", "Otras"),
 ]
-VERSION = 7
+VERSION = 8
 MAX_SEGUIDOS = 40
 REVISION_PRODUCTO = 6 * 3600   # cada cuánto se reintenta leer el precio en Amazon (suele bloquear)
 DURACION = int(os.environ.get("DURACION_MIN") or 330) * 60   # cuánto dura cada tanda
@@ -144,11 +144,14 @@ def leer_feed(url):
         if item.tag.split("}")[-1].lower() not in ("item", "entry"):
             continue
         o = {"titulo": "", "link": "", "id": "", "texto": "",
-             "tienda": "", "precio": None, "categorias": []}
+             "tienda": "", "precio": None, "categorias": [], "imagen": ""}
         for hijo in item:
             local = hijo.tag.split("}")[-1].lower()
             valor = (hijo.text or "").strip()
-            if local == "title":
+            if local in ("content", "thumbnail") and hijo.get("url"):
+                if local == "content" or not o["imagen"]:     # mejor la grande que la miniatura
+                    o["imagen"] = hijo.get("url")
+            elif local == "title":
                 o["titulo"] = limpiar(valor)
             elif local == "link":
                 o["link"] = valor or hijo.get("href", "")
@@ -528,14 +531,13 @@ def avisos_seguidos_en_chollometro(estado, nuevas):
             if d.get("objetivo") and actual is not None and actual > d["objetivo"]:
                 print("En oferta pero por encima del objetivo:", asin, actual)
                 continue
-            telegram("\n".join([
+            enviar("\n".join([
                 "🎯 <b>Un producto que sigues está en oferta</b>",
-                f"<b>{e(o['titulo'][:150])}</b>",
+                f"<b>{e(o['titulo'][:300])}</b>",
                 (f"💶 {euros(actual)}" if actual is not None else "") +
                 (f" (-{desc:.0f}%)" if desc else ""),
-                f'👉 <a href="{enlace_amazon(asin, d["dominio"])}"><b>Abrir en Amazon</b></a>',
-                f'💬 <a href="{e(o["link"], quote=True)}">Ver en Chollometro</a>',
-            ]))
+            ]), o.get("imagen"), [{"text": "🛒 Abrir en Amazon", "url": enlace_amazon(asin, d["dominio"])},
+                                 {"text": "💬 Ver en Chollometro", "url": o["link"]}])
 
 
 # ------------------------------- Apps iOS --------------------------------
@@ -560,14 +562,13 @@ def precio_anterior(o):
     return precios_pagina(o)[1]
 
 
-def formatear_app(o, antes):
+def avisar_app(o, antes):
     e = html.escape
-    lineas = ["📱 <b>App de iOS GRATIS (-100%)</b>", f"<b>{e(o['titulo'])}</b>"]
+    lineas = ["📱 <b>App de iOS GRATIS (-100%)</b>", f"<b>{e(o['titulo'][:300])}</b>"]
     if antes:
         lineas.append(f"💶 Antes {euros(antes)} → ahora GRATIS")
-    lineas += lineas_enlace(o, "Abrir en la App Store")
     lineas.append("<i>Las apps gratis suelen durar poco: si te interesa, descárgala ya y queda en tu cuenta para siempre.</i>")
-    return "\n".join(lineas)
+    enviar("\n".join(lineas), o.get("imagen"), botones_oferta(o, "📲 Abrir en la App Store"))
 
 
 # ------------------------------- Telegram --------------------------------
@@ -600,19 +601,38 @@ def telegram(texto, **extra):
     return r
 
 
+def enviar(texto, imagen=None, botones=None):
+    """Manda un mensaje con foto (si la hay) y botones de enlace; si la foto falla, va sin ella."""
+    extra = {"reply_markup": {"inline_keyboard": [[b] for b in botones]}} if botones else {}
+    if imagen:
+        r = tg("sendPhoto", chat_id=CHAT_ID, photo=imagen, caption=texto[:1024],
+               parse_mode="HTML", **extra)
+        time.sleep(1.1)
+        if r and r.get("ok"):
+            return r
+    return telegram(texto, disable_web_page_preview="true", **extra)
+
+
+def botones_oferta(o, texto_tienda="🛒 Abrir en Amazon"):
+    directo, chollometro = enlaces(o)
+    botones = [{"text": texto_tienda, "url": directo}]
+    if directo != chollometro:
+        botones.append({"text": "💬 Ver en Chollometro", "url": chollometro})
+    return botones
+
+
 def euros(v):
     return "GRATIS" if v == 0 else f"{v:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def formatear(o, desc, actual, categoria, chollazo=False):
+def avisar_oferta(o, desc, actual, categoria, chollazo=False):
     e = html.escape
     cabecera = (f"💥 <b>¡CHOLLAZO! -{desc:.0f}%</b> en Amazon" if chollazo
                 else f"🔥 <b>-{desc:.0f}%</b> en Amazon")
-    lineas = [cabecera, f"<b>{e(o['titulo'])}</b>", f"🏷️ {e(nombre_corto(categoria))}"]
+    lineas = [cabecera, f"<b>{e(o['titulo'][:300])}</b>", f"🏷️ {e(nombre_corto(categoria))}"]
     if actual is not None:
         lineas.append(f"💶 {euros(actual)}")
-    lineas += lineas_enlace(o, "Abrir en Amazon")
-    return "\n".join(lineas)
+    enviar("\n".join(lineas), o.get("imagen"), botones_oferta(o))
 
 
 # ------------------------- Preferencias y menú ---------------------------
@@ -741,7 +761,7 @@ def procesar_telegram(estado, espera=0):
             elif cmd == "/diagnostico":
                 diagnostico(estado)
             elif cmd == "/ofertas":
-                listar_ofertas(estado)
+                listar_ofertas(estado, todas="todas" in texto.lower())
             elif cmd in ("/productos", "/seguimiento"):
                 enviar_productos(estado)
             elif extraer_enlace_amazon(texto):
@@ -778,6 +798,10 @@ NOVEDADES = {
         "Si quieres un precio máximo, ponlo detrás del enlace (ej. <i>enlace 25</i>).\n"
         "Para verlos o quitarlos: /productos"),
     7: ("ℹ️ Los productos que sigues te avisarán cuando aparezcan en oferta en Chollometro."),
+    8: ("🆕 <b>Ofertas con foto y por departamentos</b>\n"
+        "/ofertas ahora te las enseña agrupadas por departamento, con la foto de cada producto "
+        "y un botón para abrirlo en Amazon. Solo salen tus departamentos marcados; "
+        "para verlas todas escribe /ofertas todas."),
 }
 
 
@@ -804,6 +828,7 @@ def presentar_version(estado):
     telegram("\n\n".join(textos))
     if previa < 6:
         enviar_menu(preferencias(estado))
+    # (a partir de la versión 8 el menú no cambia, no hace falta reenviarlo)
     estado["version"] = VERSION
 
 
@@ -895,8 +920,9 @@ def diagnostico(estado):
     telegram("\n".join(msg), disable_web_page_preview="true")
 
 
-def listar_ofertas(estado):
-    """Envía todas las ofertas de Amazon publicadas ahora, de mayor a menor descuento."""
+def listar_ofertas(estado, todas=False):
+    """Envía las ofertas de Amazon de ahora, agrupadas por departamento y con foto."""
+    p = preferencias(estado)
     telegram("⏳ Buscando las ofertas de Amazon de ahora mismo…")
     ofertas, errores = leer_ofertas()
     de_tienda = [o for o in ofertas if es_de_tienda(o) and not excluido(o)]
@@ -904,21 +930,34 @@ def listar_ofertas(estado):
         telegram("No hay ofertas de Amazon publicadas en este momento." if ofertas else
                  "⚠️ No he podido leer las ofertas ahora mismo. Prueba en unos minutos.")
         return
-    res = analizar(de_tienda)
-    res.sort(key=lambda r: (r[1] is None, -(r[1] or 0)))
-    bloques, actual = [], f"🛒 <b>{len(res)} ofertas de Amazon ahora mismo</b>\n"
-    for o, d, a in res:
-        pct = f"-{d:.0f}%" if d is not None else "—"
-        precio = f" · {euros(a)}" if a is not None else ""
-        linea = (f'\n<b>{pct}</b> <a href="{html.escape(enlaces(o)[0], quote=True)}">'
-                 f'{html.escape(o["titulo"][:80])}</a>{precio}')
-        if len(actual) + len(linea) > 3800:
-            bloques.append(actual)
-            actual = ""
-        actual += linea
-    bloques.append(actual)
-    for b in bloques:
-        telegram(b, disable_web_page_preview="true")
+    grupos = {}
+    for o, d, a in analizar(de_tienda):
+        grupos.setdefault(categoria_de(o), []).append((o, d, a))
+    orden = [feed for _, feed in CATEGORIAS if feed in grupos]
+    ocultas = [] if todas else [f for f in orden if not p["categorias"].get(f, True)]
+    orden = [f for f in orden if f not in ocultas]
+    total = sum(len(grupos[f]) for f in orden)
+    resumen = [f"🛒 <b>{total} ofertas de Amazon ahora mismo</b>, por departamento:"]
+    resumen += [f"• {html.escape(nombre_corto(f))}: {len(grupos[f])}" for f in orden]
+    if ocultas:
+        n = sum(len(grupos[f]) for f in ocultas)
+        resumen.append(f"\n<i>He ocultado {n} de departamentos que tienes desmarcados. "
+                       "Para verlas también: /ofertas todas</i>")
+    telegram("\n".join(resumen))
+    enviadas = 0
+    for f in orden:
+        if enviadas >= 40:
+            telegram("<i>Hay más ofertas, pero corto aquí para no llenarte el chat.</i>")
+            break
+        lista = sorted(grupos[f], key=lambda r: (r[1] is None, -(r[1] or 0)))
+        telegram(f"📂 <b>{html.escape(nombre_corto(f))}</b> · {len(lista)} "
+                 f"oferta{'s' if len(lista) != 1 else ''}")
+        for o, d, a in lista[:40 - enviadas]:
+            cabecera = " · ".join(x for x in (f"<b>-{d:.0f}%</b>" if d is not None else "",
+                                                f"<b>{euros(a)}</b>" if a is not None else "") if x)
+            texto = (cabecera + "\n" if cabecera else "") + html.escape(o["titulo"][:300])
+            enviar(texto, o.get("imagen"), botones_oferta(o))
+            enviadas += 1
 
 
 def revisar_ofertas(estado):
@@ -957,13 +996,13 @@ def revisar_ofertas(estado):
                 continue
             cat = categoria_de(o)
             if p["chollazos"] and d >= UMBRAL_CHOLLAZOS:
-                telegram(formatear(o, d, a, cat, chollazo=True))
+                avisar_oferta(o, d, a, cat, chollazo=True)
             elif p["categorias"].get(cat, True) and d >= p["umbral"]:
-                telegram(formatear(o, d, a, cat))
+                avisar_oferta(o, d, a, cat)
         if p["apps_ios"]:
             for o in apps:
                 if o["id"] not in vistos:
-                    telegram(formatear_app(o, precio_anterior(o)))
+                    avisar_app(o, precio_anterior(o))
 
     for o in ofertas:
         if o["id"] not in vistos:
