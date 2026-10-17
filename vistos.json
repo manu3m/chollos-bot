@@ -40,7 +40,7 @@
 "Hogar, vivienda y oficina": true,
 "Jardín y bricolaje": true,
 "Juguetes, familia e hijos": true,
-"Moda y accesorios": true,
+"Moda y accesorios": false,
 "Salud y belleza": true,
 "Supermercado y alimentación": false,
 "Deportes y aire libre": false,
@@ -52,6 +52,6 @@
 "umbral": 80.0,
 "apps_ios": true
 },
-"tg_offset": 253496478,
+"tg_offset": 253496479,
 "version": 4
 }
