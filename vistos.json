@@ -45,13 +45,13 @@
 "Supermercado y alimentación": true,
 "Deportes y aire libre": true,
 "Cine, libros, cultura y ocio": true,
-"Coches y motos": true,
+"Coches y motos": false,
 "Otras": true
 },
 "chollazos": true,
 "umbral": 80.0,
 "apps_ios": true
 },
-"tg_offset": 253496475,
+"tg_offset": 253496476,
 "version": 4
 }
