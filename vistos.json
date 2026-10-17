@@ -42,7 +42,7 @@
 "Juguetes, familia e hijos": true,
 "Moda y accesorios": true,
 "Salud y belleza": true,
-"Supermercado y alimentación": true,
+"Supermercado y alimentación": false,
 "Deportes y aire libre": false,
 "Cine, libros, cultura y ocio": true,
 "Coches y motos": false,
@@ -52,6 +52,6 @@
 "umbral": 80.0,
 "apps_ios": true
 },
-"tg_offset": 253496477,
+"tg_offset": 253496478,
 "version": 4
 }
