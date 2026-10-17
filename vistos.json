@@ -50,8 +50,8 @@
 },
 "chollazos": true,
 "umbral": 80.0,
-"apps_ios": true
+"apps_ios": false
 },
-"tg_offset": 253496473,
+"tg_offset": 253496474,
 "version": 4
 }
