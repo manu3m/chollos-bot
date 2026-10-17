@@ -54,7 +54,7 @@ CATEGORIAS = [
     ("Coches y motos", "Coches y motos"),
     ("Otras", "Otras"),
 ]
-VERSION = 4
+VERSION = 5
 DURACION = int(os.environ.get("DURACION_MIN") or 330) * 60   # cuánto dura cada tanda
 INTERVALO = int(os.environ.get("INTERVALO_SEG") or 240)      # cada cuánto mira ofertas
 
@@ -71,6 +71,7 @@ PALABRAS_ANTES = (r"(?:antes|pvpr?|p\.v\.p\.?r?\.?|precio\s(?:anterior|habitual|
 AYUDA = ("🤖 <b>Comandos</b>\n"
          "/categorias – elegir departamentos, chollazos y apps iOS gratis\n"
          "/umbral 85 – cambiar el descuento mínimo de aviso\n"
+         "/ofertas – ver todas las ofertas de Amazon de ahora mismo\n"
          "/estado – ver tu configuración actual\n"
          "/diagnostico – comprobar que todo funciona")
 
@@ -266,9 +267,11 @@ def enlace_visita(o):
     return None
 
 
-def resolver(url, saltos=6):
+def resolver(url, saltos=6, traza=None):
     """Sigue las redirecciones sin llegar a abrir la tienda; devuelve la URL de Amazon/App Store."""
+    traza = traza if traza is not None else []
     for _ in range(saltos):
+        traza.append(url[:120])
         if es_tienda_final(url):
             return limpiar_destino(url)
         req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "es-ES,es;q=0.9"})
@@ -278,6 +281,7 @@ def resolver(url, saltos=6):
             m = (re.search(r'http-equiv=["\']refresh["\'][^>]*url=([^"\'>]+)', cuerpo, re.I)
                  or re.search(r'location(?:\.href)?\s*=\s*["\']([^"\']+)', cuerpo))
             if not m:
+                traza.append("200 sin redirección")
                 return None
             url = urllib.parse.urljoin(url, html.unescape(m.group(1)))
         except urllib.error.HTTPError as e:
@@ -285,17 +289,24 @@ def resolver(url, saltos=6):
             if e.code in (301, 302, 303, 307, 308) and destino:
                 url = urllib.parse.urljoin(url, destino)
             else:
+                traza.append(f"HTTP {e.code}")
                 return None
-        except Exception:
+        except Exception as ex:
+            traza.append(f"error: {ex}")
             return None
     return None
 
 
-def enlaces(o):
+_cache_enlaces = {}
+
+
+def enlaces(o, traza=None):
     """(enlace directo a la tienda, enlace a Chollometro)."""
-    visita = enlace_visita(o)
-    directo = resolver(visita) if visita else None
-    return directo or visita or o["link"], o["link"]
+    if o["id"] not in _cache_enlaces or traza is not None:
+        visita = enlace_visita(o)
+        directo = resolver(visita, traza=traza) if visita else None
+        _cache_enlaces[o["id"]] = directo or visita or o["link"]
+    return _cache_enlaces[o["id"]], o["link"]
 
 
 def lineas_enlace(o, texto_tienda):
@@ -361,8 +372,8 @@ def tg(metodo, **params):
 
 def telegram(texto, **extra):
     global fallo_telegram
-    r = tg("sendMessage", chat_id=CHAT_ID, text=texto, parse_mode="HTML",
-           disable_web_page_preview="false", **extra)
+    extra.setdefault("disable_web_page_preview", "false")
+    r = tg("sendMessage", chat_id=CHAT_ID, text=texto, parse_mode="HTML", **extra)
     if TOKEN and not r:
         fallo_telegram = True
     time.sleep(1.1)  # Telegram limita a ~1 mensaje por segundo
@@ -496,6 +507,8 @@ def procesar_telegram(estado, espera=0):
                 telegram(resumen(p))
             elif cmd == "/diagnostico":
                 diagnostico(estado)
+            elif cmd == "/ofertas":
+                listar_ofertas(estado)
             elif texto:
                 telegram(AYUDA)
     for mid in menus:
@@ -516,6 +529,9 @@ NOVEDADES = {
     4: ("🆕 <b>Ahora respondo al instante</b>\n"
         "Los botones del menú y los comandos funcionan en el momento. "
         "Los botones que pulsaste antes no se han aplicado: usa este menú nuevo."),
+    5: ("🆕 <b>Nuevo comando /ofertas</b>\n"
+        "Te enseña todas las ofertas de Amazon publicadas ahora mismo, de mayor a menor "
+        "descuento, con enlace directo a Amazon."),
 }
 
 
@@ -532,11 +548,13 @@ def presentar_version(estado):
         {"command": "categorias", "description": "Elegir departamentos, chollazos y apps iOS"},
         {"command": "umbral", "description": "Cambiar el descuento mínimo (ej. /umbral 85)"},
         {"command": "estado", "description": "Ver tu configuración"},
+        {"command": "ofertas", "description": "Ver todas las ofertas de Amazon de ahora"},
         {"command": "diagnostico", "description": "Comprobar que todo funciona"},
     ])
     textos = [t for v, t in sorted(NOVEDADES.items()) if previa < v <= VERSION]
-    telegram("\n\n".join(textos) + "\n\nEscribe /categorias cuando quieras cambiar tus filtros.")
-    enviar_menu(preferencias(estado))
+    telegram("\n\n".join(textos))
+    if previa < 4:
+        enviar_menu(preferencias(estado))
     estado["version"] = VERSION
 
 
@@ -597,22 +615,55 @@ def diagnostico(estado):
            f"Ofertas leídas: {len(ofertas)}",
            f"De {TIENDA.capitalize()}: {len(de_tienda)}",
            f"Con descuento detectado: {len(con_desc)}",
+           f"Superan tu umbral del {p['umbral']:.0f}%: {sum(1 for r in con_desc if r[1] >= p['umbral'])}",
            f"Apps iOS gratis ahora: {len(apps)}",
-           f"Umbral de aviso: {p['umbral']:.0f}% · Chollazos: {UMBRAL_CHOLLAZOS:.0f}%",
            "Por departamento: " + html.escape(", ".join(
                f"{c} {n}" for c, n in sorted(por_cat.items(), key=lambda x: -x[1])))]
     if de_tienda:
-        directo, _ = enlaces(de_tienda[0])
-        msg.append("Enlace directo a Amazon: " + ("✅ funciona" if es_tienda_final(directo)
-                   else "⚠️ no disponible, se usará la redirección de Chollometro"))
+        traza = []
+        directo, _ = enlaces(de_tienda[0], traza=traza)
+        print("Traza del enlace directo:", " -> ".join(traza))
+        if es_tienda_final(directo):
+            msg.append("Enlace directo a Amazon: ✅ funciona")
+        else:
+            msg.append("Enlace directo a Amazon: ⚠️ no disponible ("
+                       + html.escape(traza[-1] if traza else "?")[:80] + ")")
     if errores:
         msg.append("Fuentes con error: " + html.escape("; ".join(errores))[:400])
     if con_desc:
-        msg.append("\n<b>Mayores descuentos ahora mismo:</b>")
+        msg.append("\n<b>Los 5 mayores descuentos ahora mismo:</b>")
         for o, d, a in con_desc[:5]:
-            msg.append(f'• -{d:.0f}% <a href="{html.escape(o["link"], quote=True)}">'
+            msg.append(f'• -{d:.0f}% <a href="{html.escape(enlaces(o)[0], quote=True)}">'
                        f'{html.escape(o["titulo"][:70])}</a>')
-    telegram("\n".join(msg))
+    msg.append("\n<i>Esto es solo una comprobación. Para ver todas las ofertas de Amazon "
+               "publicadas ahora mismo, escribe /ofertas.</i>")
+    telegram("\n".join(msg), disable_web_page_preview="true")
+
+
+def listar_ofertas(estado):
+    """Envía todas las ofertas de Amazon publicadas ahora, de mayor a menor descuento."""
+    telegram("⏳ Buscando las ofertas de Amazon de ahora mismo…")
+    ofertas, errores = leer_ofertas()
+    de_tienda = [o for o in ofertas if es_de_tienda(o) and not excluido(o)]
+    if not de_tienda:
+        telegram("No hay ofertas de Amazon publicadas en este momento." if ofertas else
+                 "⚠️ No he podido leer las ofertas ahora mismo. Prueba en unos minutos.")
+        return
+    res = analizar(de_tienda)
+    res.sort(key=lambda r: (r[1] is None, -(r[1] or 0)))
+    bloques, actual = [], f"🛒 <b>{len(res)} ofertas de Amazon ahora mismo</b>\n"
+    for o, d, a in res:
+        pct = f"-{d:.0f}%" if d is not None else "—"
+        precio = f" · {euros(a)}" if a is not None else ""
+        linea = (f'\n<b>{pct}</b> <a href="{html.escape(enlaces(o)[0], quote=True)}">'
+                 f'{html.escape(o["titulo"][:80])}</a>{precio}')
+        if len(actual) + len(linea) > 3800:
+            bloques.append(actual)
+            actual = ""
+        actual += linea
+    bloques.append(actual)
+    for b in bloques:
+        telegram(b, disable_web_page_preview="true")
 
 
 def revisar_ofertas(estado):
