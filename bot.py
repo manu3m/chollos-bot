@@ -7,12 +7,15 @@ Lee las ofertas nuevas de Chollometro, se queda con las de Amazon y avisa:
   - de los "chollazos" (95 % o más) de cualquier categoría, si los tienes activados;
   - de las apps de iOS que se pongan gratis (100 %) en la App Store, si lo activas.
 Las categorías y el umbral se cambian desde Telegram con /categorias y /umbral.
-Pensado para ejecutarse gratis cada 5 minutos con GitHub Actions.
+
+Funciona en GitHub Actions como un bucle de varias horas: responde al instante en
+Telegram, revisa las ofertas cada pocos minutos y, antes de terminar, se relanza solo.
 """
 import html
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import unicodedata
@@ -51,7 +54,9 @@ CATEGORIAS = [
     ("Coches y motos", "Coches y motos"),
     ("Otras", "Otras"),
 ]
-VERSION = 3
+VERSION = 4
+DURACION = int(os.environ.get("DURACION_MIN") or 330) * 60   # cuánto dura cada tanda
+INTERVALO = int(os.environ.get("INTERVALO_SEG") or 240)      # cada cuánto mira ofertas
 
 ESTADO = Path(__file__).with_name("vistos.json")
 MAX_VISTOS = 3000
@@ -66,8 +71,8 @@ PALABRAS_ANTES = (r"(?:antes|pvpr?|p\.v\.p\.?r?\.?|precio\s(?:anterior|habitual|
 AYUDA = ("🤖 <b>Comandos</b>\n"
          "/categorias – elegir departamentos, chollazos y apps iOS gratis\n"
          "/umbral 85 – cambiar el descuento mínimo de aviso\n"
-         "/estado – ver tu configuración actual\n\n"
-         "Reviso Telegram cada 5 minutos, así que te respondo en unos minutos.")
+         "/estado – ver tu configuración actual\n"
+         "/diagnostico – comprobar que todo funciona")
 
 fallo_telegram = False
 
@@ -344,7 +349,8 @@ def tg(metodo, **params):
     req = urllib.request.Request(f"https://api.telegram.org/bot{TOKEN}/{metodo}",
                                  data=urllib.parse.urlencode(datos).encode())
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        espera = int(params.get("timeout", 0)) + 20
+        with urllib.request.urlopen(req, timeout=espera) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         print("Telegram", metodo, e.code, e.read().decode(errors="replace"))
@@ -398,7 +404,7 @@ def texto_menu(p):
             f"💥 <b>Chollazos:</b> descuento del {UMBRAL_CHOLLAZOS:.0f}% o más, "
             "de cualquier departamento (aunque esté desmarcado).\n"
             "📱 <b>Apps iOS gratis:</b> apps de la App Store que pasan a costar 0 €.\n\n"
-            "<i>Los cambios se aplican en unos minutos.</i>")
+            "<i>Los cambios se aplican al momento.</i>")
 
 
 def teclado(p):
@@ -434,16 +440,21 @@ def resumen(p):
             f"Departamentos: {', '.join(activas) if activas else 'ninguno'}")
 
 
-def procesar_telegram(estado):
-    """Lee lo que le has escrito o pulsado al bot desde la última ejecución."""
+def procesar_telegram(estado, espera=0):
+    """Espera hasta "espera" segundos a que escribas o pulses algo y lo atiende al momento.
+    Devuelve True si ha cambiado algo que haya que guardar."""
     p = preferencias(estado)
     if not TOKEN or not CHAT_ID:
-        return
+        time.sleep(espera)
+        return False
     offset = estado.get("tg_offset", 0)
-    r = tg("getUpdates", offset=offset, timeout=0,
+    r = tg("getUpdates", offset=offset, timeout=espera,
            allowed_updates=["message", "callback_query"])
     if not r or not r.get("ok"):
-        return
+        time.sleep(5)
+        return False
+    if not r["result"]:
+        return False
     menus = set()
     for u in r["result"]:
         offset = max(offset, u["update_id"] + 1)
@@ -464,7 +475,7 @@ def procesar_telegram(estado):
                 for _, feed in CATEGORIAS:
                     p["categorias"][feed] = d == "all"
             menus.add(msg.get("message_id"))
-            tg("answerCallbackQuery", callback_query_id=cq["id"])
+            tg("answerCallbackQuery", callback_query_id=cq["id"], text="✅ Cambiado")
         elif "message" in u:
             m = u["message"]
             if str(m.get("chat", {}).get("id")) != CHAT_ID:
@@ -483,6 +494,8 @@ def procesar_telegram(estado):
                     telegram("Escríbelo así, por ejemplo: /umbral 85")
             elif cmd == "/estado":
                 telegram(resumen(p))
+            elif cmd == "/diagnostico":
+                diagnostico(estado)
             elif texto:
                 telegram(AYUDA)
     for mid in menus:
@@ -490,6 +503,7 @@ def procesar_telegram(estado):
             tg("editMessageText", chat_id=CHAT_ID, message_id=mid, text=texto_menu(p),
                parse_mode="HTML", reply_markup=teclado(p))
     estado["tg_offset"] = offset
+    return True
 
 
 NOVEDADES = {
@@ -499,6 +513,9 @@ NOVEDADES = {
     3: ("🆕 <b>Novedad: apps de iOS gratis</b>\n"
         "Te avisaré cuando una app de pago de la App Store se ponga gratis (-100%). "
         "Puedes desactivarlo en el menú con el botón 📱."),
+    4: ("🆕 <b>Ahora respondo al instante</b>\n"
+        "Los botones del menú y los comandos funcionan en el momento. "
+        "Los botones que pulsaste antes no se han aplicado: usa este menú nuevo."),
 }
 
 
@@ -506,10 +523,16 @@ def presentar_version(estado):
     previa = estado.get("version", 1)
     if previa >= VERSION or not TOKEN or not CHAT_ID:
         return
+    if previa < 4:
+        # descarta las pulsaciones que se quedaron sin atender con la versión anterior
+        r = tg("getUpdates", offset=-1, timeout=0)
+        if r and r.get("ok") and r["result"]:
+            estado["tg_offset"] = r["result"][-1]["update_id"] + 1
     tg("setMyCommands", commands=[
         {"command": "categorias", "description": "Elegir departamentos, chollazos y apps iOS"},
         {"command": "umbral", "description": "Cambiar el descuento mínimo (ej. /umbral 85)"},
         {"command": "estado", "description": "Ver tu configuración"},
+        {"command": "diagnostico", "description": "Comprobar que todo funciona"},
     ])
     textos = [t for v, t in sorted(NOVEDADES.items()) if previa < v <= VERSION]
     telegram("\n\n".join(textos) + "\n\nEscribe /categorias cuando quieras cambiar tus filtros.")
@@ -543,14 +566,7 @@ def excluido(o):
     return any(p in t for p in EXCLUIR)
 
 
-def main():
-    estado = cargar_estado()
-    estado.setdefault("vistos", [])
-    p = preferencias(estado)
-    procesar_telegram(estado)
-    presentar_version(estado)
-    vistos = set(estado["vistos"])
-
+def leer_ofertas():
     ofertas, errores = {}, []
     for url in FEEDS:
         try:
@@ -559,14 +575,56 @@ def main():
         except Exception as ex:
             errores.append(f"{url} → {ex}")
             print("Error leyendo", url, "→", ex)
-    ofertas = list(ofertas.values())
+    return list(ofertas.values()), errores
+
+
+def diagnostico(estado):
+    p = preferencias(estado)
+    ofertas, errores = leer_ofertas()
+    if not ofertas:
+        telegram("⚠️ <b>No he podido leer las ofertas.</b>\n"
+                 + html.escape("\n".join(errores))[:900])
+        return
+    de_tienda = [o for o in ofertas if es_de_tienda(o) and not excluido(o)]
+    apps = [o for o in ofertas if es_app_ios(o) and es_gratis(o)]
+    res = analizar(de_tienda)
+    con_desc = sorted([r for r in res if r[1] is not None], key=lambda r: r[1], reverse=True)
+    por_cat = {}
+    for o in de_tienda:
+        c = nombre_corto(categoria_de(o))
+        por_cat[c] = por_cat.get(c, 0) + 1
+    msg = ["🧪 <b>Diagnóstico del bot</b>",
+           f"Ofertas leídas: {len(ofertas)}",
+           f"De {TIENDA.capitalize()}: {len(de_tienda)}",
+           f"Con descuento detectado: {len(con_desc)}",
+           f"Apps iOS gratis ahora: {len(apps)}",
+           f"Umbral de aviso: {p['umbral']:.0f}% · Chollazos: {UMBRAL_CHOLLAZOS:.0f}%",
+           "Por departamento: " + html.escape(", ".join(
+               f"{c} {n}" for c, n in sorted(por_cat.items(), key=lambda x: -x[1])))]
+    if de_tienda:
+        directo, _ = enlaces(de_tienda[0])
+        msg.append("Enlace directo a Amazon: " + ("✅ funciona" if es_tienda_final(directo)
+                   else "⚠️ no disponible, se usará la redirección de Chollometro"))
+    if errores:
+        msg.append("Fuentes con error: " + html.escape("; ".join(errores))[:400])
+    if con_desc:
+        msg.append("\n<b>Mayores descuentos ahora mismo:</b>")
+        for o, d, a in con_desc[:5]:
+            msg.append(f'• -{d:.0f}% <a href="{html.escape(o["link"], quote=True)}">'
+                       f'{html.escape(o["titulo"][:70])}</a>')
+    telegram("\n".join(msg))
+
+
+def revisar_ofertas(estado):
+    p = preferencias(estado)
+    vistos = set(estado["vistos"])
+    ofertas, errores = leer_ofertas()
 
     if not ofertas:
-        if not estado.get("fallando") or MODO == "diagnostico":
+        if not estado.get("fallando"):
             telegram("⚠️ <b>No he podido leer las ofertas.</b>\n"
                      + html.escape("\n".join(errores))[:900])
         estado["fallando"] = True
-        guardar_estado(estado)
         return
     if estado.get("fallando"):
         telegram("✅ Vuelvo a leer ofertas con normalidad.")
@@ -574,37 +632,6 @@ def main():
 
     de_tienda = [o for o in ofertas if es_de_tienda(o) and not excluido(o)]
     apps = [o for o in ofertas if es_app_ios(o) and es_gratis(o)]
-
-    if MODO == "diagnostico":
-        res = analizar(de_tienda)
-        con_desc = sorted([r for r in res if r[1] is not None],
-                          key=lambda r: r[1], reverse=True)
-        por_cat = {}
-        for o in de_tienda:
-            c = nombre_corto(categoria_de(o))
-            por_cat[c] = por_cat.get(c, 0) + 1
-        msg = ["🧪 <b>Diagnóstico del bot</b>",
-               f"Ofertas leídas: {len(ofertas)}",
-               f"De {TIENDA.capitalize()}: {len(de_tienda)}",
-               f"Con descuento detectado: {len(con_desc)}",
-               f"Apps iOS gratis ahora: {len(apps)}",
-               f"Umbral de aviso: {p['umbral']:.0f}% · Chollazos: {UMBRAL_CHOLLAZOS:.0f}%",
-               "Por departamento: " + html.escape(", ".join(
-                   f"{c} {n}" for c, n in sorted(por_cat.items(), key=lambda x: -x[1])))]
-        if de_tienda:
-            directo, _ = enlaces(de_tienda[0])
-            msg.append("Enlace directo a Amazon: " + ("✅ funciona" if es_tienda_final(directo)
-                       else "⚠️ no disponible, se usará la redirección de Chollometro"))
-        if errores:
-            msg.append("Fuentes con error: " + html.escape("; ".join(errores))[:400])
-        if con_desc:
-            msg.append("\n<b>Mayores descuentos ahora mismo:</b>")
-            for o, d, a in con_desc[:5]:
-                msg.append(f'• -{d:.0f}% <a href="{html.escape(o["link"], quote=True)}">'
-                           f'{html.escape(o["titulo"][:70])}</a>')
-        telegram("\n".join(msg))
-        guardar_estado(estado)
-        return
 
     if not estado.get("iniciado"):
         telegram(f"✅ <b>Bot activado</b>\nHe leído {len(ofertas)} ofertas "
@@ -632,9 +659,111 @@ def main():
         if o["id"] not in vistos:
             estado["vistos"].append(o["id"])
             vistos.add(o["id"])
+
+
+# --------------------------- GitHub (estado y relanzar) -------------------
+EN_GITHUB = bool(os.environ.get("GITHUB_ACTIONS"))
+
+
+def git(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True)
+
+
+def git_guardar():
+    """Sube vistos.json al repositorio para no perder el estado."""
+    if not EN_GITHUB:
+        return
+    git("config", "user.name", "bot-chollos")
+    git("config", "user.email", "bot-chollos@users.noreply.github.com")
+    git("add", "vistos.json")
+    if git("diff", "--staged", "--quiet").returncode == 0:
+        return
+    git("commit", "-q", "-m", "Actualiza estado")
+    git("pull", "--rebase", "-q", "origin", "main")
+    r = git("push", "-q", "origin", "HEAD:main")
+    if r.returncode:
+        print("No se pudo subir el estado:", r.stderr[-300:])
+
+
+def huella_codigo(ref):
+    return git("rev-parse", f"{ref}:bot.py").stdout.strip() + \
+        git("rev-parse", f"{ref}:.github/workflows/alertas.yml").stdout.strip()
+
+
+def codigo_cambiado(huella_inicial):
+    if not EN_GITHUB:
+        return False
+    git("fetch", "-q", "origin", "main")
+    return huella_codigo("origin/main") not in ("", huella_inicial)
+
+
+def relanzar():
+    token, repo = os.environ.get("GITHUB_TOKEN"), os.environ.get("GITHUB_REPOSITORY")
+    if not token or not repo:
+        return
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/actions/workflows/alertas.yml/dispatches",
+        data=json.dumps({"ref": "main", "inputs": {"modo": "normal"}}).encode(),
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                 "User-Agent": "chollos-bot"}, method="POST")
+    try:
+        urllib.request.urlopen(req, timeout=20)
+        print("Siguiente tanda programada.")
+    except Exception as e:
+        print("No se pudo relanzar:", e)
+
+
+# --------------------------------- Main ----------------------------------
+def main():
+    estado = cargar_estado()
+    estado.setdefault("vistos", [])
+
+    if MODO == "diagnostico":
+        diagnostico(estado)   # no toca Telegram ni el estado del bot en marcha
+        return
+
+    huella = huella_codigo("HEAD") if EN_GITHUB else ""
+    presentar_version(estado)
     guardar_estado(estado)
+    git_guardar()
+
+    inicio = time.time()
+    ultimo_feed = ultimo_guardado = ultima_comprobacion = 0.0
+    while time.time() - inicio < DURACION:
+        ahora = time.time()
+        if ahora - ultimo_feed >= INTERVALO:
+            try:
+                revisar_ofertas(estado)
+            except Exception as ex:
+                print("Error revisando ofertas:", ex)
+            guardar_estado(estado)
+            ultimo_feed = time.time()
+        if ahora - ultimo_guardado >= 900:
+            git_guardar()
+            ultimo_guardado = time.time()
+        if ahora - ultima_comprobacion >= 600:
+            ultima_comprobacion = time.time()
+            if codigo_cambiado(huella):
+                print("Hay una versión nueva del bot: reinicio para cargarla.")
+                break
+        espera = int(max(1, min(50, INTERVALO - (time.time() - ultimo_feed))))
+        try:
+            cambios = procesar_telegram(estado, espera)
+        except Exception as ex:
+            print("Error atendiendo Telegram:", ex)
+            cambios = False
+            time.sleep(5)
+        if cambios:
+            guardar_estado(estado)
+            git_guardar()
+            ultimo_guardado = time.time()
+
+    guardar_estado(estado)
+    git_guardar()
+    relanzar()
 
 
 if __name__ == "__main__":
     main()
-    sys.exit(1 if fallo_telegram else 0)
+    # en modo bucle un fallo puntual de Telegram no debe marcar la tanda como fallida
+    sys.exit(1 if fallo_telegram and MODO == "diagnostico" else 0)
