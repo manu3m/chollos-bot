@@ -379,6 +379,35 @@ def leer_amazon(asin, dominio="www.amazon.es"):
     return precio, titulo, None
 
 
+def probar_fuentes(asin):
+    """Solo para diagnóstico: prueba varias formas de leer el precio y lo deja en el registro."""
+    ua_movil = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
+                "(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
+    pruebas = [
+        ("amazon escritorio", f"https://www.amazon.es/dp/{asin}", UA),
+        ("amazon movil", f"https://www.amazon.es/dp/{asin}", ua_movil),
+        ("amazon aod", f"https://www.amazon.es/gp/aod/ajax?asin={asin}&pc=dp", UA),
+        ("camel", f"https://es.camelcamelcamel.com/product/{asin}", UA),
+        ("camel movil", f"https://es.camelcamelcamel.com/product/{asin}", ua_movil),
+    ]
+    for nombre, url, ua in pruebas:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept-Language": "es-ES,es;q=0.9",
+                                                       "Accept": "text/html,*/*;q=0.8"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                pag = r.read().decode("utf-8", errors="replace")
+                codigo = r.status
+        except urllib.error.HTTPError as e:
+            print(f"PRUEBA {nombre}: HTTP {e.code}")
+            continue
+        except Exception as e:
+            print(f"PRUEBA {nombre}: error {e.__class__.__name__}")
+            continue
+        captcha = bool(re.search(r"captcha|Robot Check|cf-challenge|Just a moment", pag, re.I))
+        precios = re.findall(r"\d{1,4}(?:[.,]\d{2})\s?(?:€|&euro;|&nbsp;€)", pag)[:4]
+        print(f"PRUEBA {nombre}: {codigo} len={len(pag)} captcha={captcha} precios={precios}")
+
+
 def enlace_amazon(asin, dominio="www.amazon.es"):
     return f"https://{dominio}/dp/{asin}"
 
@@ -864,6 +893,8 @@ def diagnostico(estado):
             if asin:
                 precio, _, motivo = leer_amazon(asin, urllib.parse.urlparse(directo).netloc)
                 print("Lectura de Amazon:", asin, precio, motivo)
+                if MODO == "diagnostico":
+                    probar_fuentes(asin)
                 msg.append("Lectura de precios en Amazon: " + (f"✅ funciona ({euros(precio)})" if precio
                            else "⚠️ " + html.escape(motivo or "sin datos")))
         else:
