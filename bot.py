@@ -57,9 +57,9 @@ CATEGORIAS = [
     ("Coches y motos", "Coches y motos"),
     ("Otras", "Otras"),
 ]
-VERSION = 6
+VERSION = 7
 MAX_SEGUIDOS = 40
-REVISION_PRODUCTO = 30 * 60   # cada cuánto se mira el precio de cada producto seguido
+REVISION_PRODUCTO = 6 * 3600   # cada cuánto se reintenta leer el precio en Amazon (suele bloquear)
 DURACION = int(os.environ.get("DURACION_MIN") or 330) * 60   # cuánto dura cada tanda
 INTERVALO = int(os.environ.get("INTERVALO_SEG") or 240)      # cada cuánto mira ofertas
 
@@ -379,35 +379,6 @@ def leer_amazon(asin, dominio="www.amazon.es"):
     return precio, titulo, None
 
 
-def probar_fuentes(asin):
-    """Solo para diagnóstico: prueba varias formas de leer el precio y lo deja en el registro."""
-    ua_movil = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
-                "(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
-    pruebas = [
-        ("amazon escritorio", f"https://www.amazon.es/dp/{asin}", UA),
-        ("amazon movil", f"https://www.amazon.es/dp/{asin}", ua_movil),
-        ("amazon aod", f"https://www.amazon.es/gp/aod/ajax?asin={asin}&pc=dp", UA),
-        ("camel", f"https://es.camelcamelcamel.com/product/{asin}", UA),
-        ("camel movil", f"https://es.camelcamelcamel.com/product/{asin}", ua_movil),
-    ]
-    for nombre, url, ua in pruebas:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept-Language": "es-ES,es;q=0.9",
-                                                       "Accept": "text/html,*/*;q=0.8"})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                pag = r.read().decode("utf-8", errors="replace")
-                codigo = r.status
-        except urllib.error.HTTPError as e:
-            print(f"PRUEBA {nombre}: HTTP {e.code}")
-            continue
-        except Exception as e:
-            print(f"PRUEBA {nombre}: error {e.__class__.__name__}")
-            continue
-        captcha = bool(re.search(r"captcha|Robot Check|cf-challenge|Just a moment", pag, re.I))
-        precios = re.findall(r"\d{1,4}(?:[.,]\d{2})\s?(?:€|&euro;|&nbsp;€)", pag)[:4]
-        print(f"PRUEBA {nombre}: {codigo} len={len(pag)} captcha={captcha} precios={precios}")
-
-
 def enlace_amazon(asin, dominio="www.amazon.es"):
     return f"https://{dominio}/dp/{asin}"
 
@@ -415,6 +386,14 @@ def enlace_amazon(asin, dominio="www.amazon.es"):
 def extraer_enlace_amazon(texto):
     m = re.search(r"https?://\S*(?:amazon\.[a-z.]+|amzn\.[a-z]+|a\.co)/\S*", texto, re.I)
     return m.group(0).rstrip(").,;") if m else None
+
+
+def titulo_compartido(texto, url):
+    """Saca el nombre del producto del texto que pone la app de Amazon al compartir."""
+    antes = texto.split(url, 1)[0] if url else ""
+    antes = re.sub(r"(?i)^(/seguir|echa un vistazo a( este (producto|artículo))?:?|mira (esto|este producto):?)",
+                   "", antes.strip()).strip(" :\"'«»“”-")
+    return antes[:150] if len(antes) >= 4 else None
 
 
 def seguir_producto(estado, texto):
@@ -440,7 +419,7 @@ def seguir_producto(estado, texto):
     precio, titulo, motivo = leer_amazon(asin, dominio)
     previo = seguidos.get(asin, {})
     seguidos[asin] = {
-        "titulo": titulo or previo.get("titulo") or f"Producto {asin}",
+        "titulo": titulo or titulo_compartido(texto, url) or previo.get("titulo") or f"Producto {asin}",
         "dominio": dominio, "objetivo": objetivo,
         "minimo": precio if precio is not None else previo.get("minimo"),
         "ultimo": precio, "revisado": time.time(), "avisado": None,
@@ -451,11 +430,16 @@ def seguir_producto(estado, texto):
     if precio is not None:
         lineas.append(f"💶 Precio ahora: <b>{euros(precio)}</b>")
     else:
-        lineas.append(f"⚠️ Ahora mismo no he podido leer el precio: {e(motivo)}. "
-                      "Lo seguiré intentando, y también te avisaré si aparece en oferta en Chollometro.")
-    lineas.append(f"🔔 Te avisaré cuando baje a <b>{euros(objetivo)}</b> o menos." if objetivo else
-                  "🔔 Te avisaré cada vez que baje de precio. "
-                  "Si quieres un precio objetivo, mándame el enlace con el precio detrás (ej. enlace 25).")
+        print("Sin precio al añadir", asin, "→", motivo)
+        lineas.append("🔔 Te avisaré en cuanto este producto aparezca <b>en oferta en Chollometro</b>, "
+                      "con su precio y enlace directo a Amazon.")
+        if objetivo:
+            lineas.append(f"🎯 Solo te avisaré si la oferta es de <b>{euros(objetivo)}</b> o menos.")
+        lineas.append("<i>Amazon no deja que el bot lea sus precios directamente, así que no puedo "
+                      "avisarte de bajadas pequeñas que nadie publique.</i>")
+    if precio is not None:
+        lineas.append(f"🔔 Te avisaré cuando baje a <b>{euros(objetivo)}</b> o menos." if objetivo else
+                      "🔔 Te avisaré cada vez que baje de precio.")
     telegram("\n".join(lineas), disable_web_page_preview="true")
 
 
@@ -514,13 +498,8 @@ def comprobar_precios(estado, maximo=6):
             avisar_bajada(asin, d, minimo, precio)
         if minimo is None or precio < minimo:
             d["minimo"] = precio
-    if leidos == 0 and fallidos >= 2 and not estado.get("amazon_bloqueado"):
-        estado["amazon_bloqueado"] = True
-        telegram("⚠️ Ahora mismo Amazon no me deja leer los precios. Lo seguiré intentando "
-                 "y, mientras tanto, te avisaré si tus productos aparecen en oferta en Chollometro.")
-    elif leidos and estado.get("amazon_bloqueado"):
-        estado["amazon_bloqueado"] = False
-        telegram("✅ Vuelvo a poder leer los precios de Amazon.")
+    if pendientes:
+        print(f"Precios en Amazon: {leidos} leídos, {fallidos} bloqueados")
 
 
 def avisar_bajada(asin, d, antes, ahora, objetivo=False):
@@ -546,6 +525,9 @@ def avisos_seguidos_en_chollometro(estado, nuevas):
         if asin in seguidos:
             d, (desc, actual) = seguidos[asin], calcular_descuento(o)
             e = html.escape
+            if d.get("objetivo") and actual is not None and actual > d["objetivo"]:
+                print("En oferta pero por encima del objetivo:", asin, actual)
+                continue
             telegram("\n".join([
                 "🎯 <b>Un producto que sigues está en oferta</b>",
                 f"<b>{e(o['titulo'][:150])}</b>",
@@ -790,11 +772,12 @@ NOVEDADES = {
     5: ("🆕 <b>Nuevo comando /ofertas</b>\n"
         "Te enseña todas las ofertas de Amazon publicadas ahora mismo, de mayor a menor "
         "descuento, con enlace directo a Amazon."),
-    6: ("🆕 <b>Novedad: sigue productos y te aviso cuando bajen</b>\n"
+    6: ("🆕 <b>Novedad: sigue productos de Amazon</b>\n"
         "En la app de Amazon abre un producto, pulsa <b>Compartir → Telegram</b> y elige este bot "
-        "(o pega aquí el enlace). Te avisaré cada vez que baje de precio.\n"
-        "Si quieres un precio objetivo, pon el precio detrás del enlace (ej. <i>enlace 25</i>).\n"
+        "(o pega aquí el enlace). Te avisaré en cuanto aparezca en oferta.\n"
+        "Si quieres un precio máximo, ponlo detrás del enlace (ej. <i>enlace 25</i>).\n"
         "Para verlos o quitarlos: /productos"),
+    7: ("ℹ️ Los productos que sigues te avisarán cuando aparezcan en oferta en Chollometro."),
 }
 
 
@@ -816,6 +799,8 @@ def presentar_version(estado):
         {"command": "diagnostico", "description": "Comprobar que todo funciona"},
     ])
     textos = [t for v, t in sorted(NOVEDADES.items()) if previa < v <= VERSION]
+    if previa < 6:
+        textos = [t for t in textos if t != NOVEDADES[7]]
     telegram("\n\n".join(textos))
     if previa < 6:
         enviar_menu(preferencias(estado))
@@ -893,8 +878,6 @@ def diagnostico(estado):
             if asin:
                 precio, _, motivo = leer_amazon(asin, urllib.parse.urlparse(directo).netloc)
                 print("Lectura de Amazon:", asin, precio, motivo)
-                if MODO == "diagnostico":
-                    probar_fuentes(asin)
                 msg.append("Lectura de precios en Amazon: " + (f"✅ funciona ({euros(precio)})" if precio
                            else "⚠️ " + html.escape(motivo or "sin datos")))
         else:
