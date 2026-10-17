@@ -5,7 +5,8 @@ Bot de alertas de chollos de Amazon -> Telegram, con filtro por categorías.
 Lee las ofertas nuevas de Chollometro, se queda con las de Amazon y avisa:
   - de las que superen tu umbral (80 % por defecto) en las categorías que elijas;
   - de los "chollazos" (95 % o más) de cualquier categoría, si los tienes activados;
-  - de las apps de iOS que se pongan gratis (100 %) en la App Store, si lo activas.
+  - de las apps de iOS que se pongan gratis (100 %) en la App Store, si lo activas;
+  - de las bajadas de precio de los productos de Amazon que le pidas seguir.
 Las categorías y el umbral se cambian desde Telegram con /categorias y /umbral.
 
 Funciona en GitHub Actions como un bucle de varias horas: responde al instante en
@@ -24,6 +25,8 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+sys.stdout.reconfigure(line_buffering=True)   # que los registros salgan al momento en GitHub
 
 # ----------------------------- Configuración -----------------------------
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
@@ -54,7 +57,9 @@ CATEGORIAS = [
     ("Coches y motos", "Coches y motos"),
     ("Otras", "Otras"),
 ]
-VERSION = 5
+VERSION = 6
+MAX_SEGUIDOS = 40
+REVISION_PRODUCTO = 30 * 60   # cada cuánto se mira el precio de cada producto seguido
 DURACION = int(os.environ.get("DURACION_MIN") or 330) * 60   # cuánto dura cada tanda
 INTERVALO = int(os.environ.get("INTERVALO_SEG") or 240)      # cada cuánto mira ofertas
 
@@ -72,6 +77,9 @@ AYUDA = ("🤖 <b>Comandos</b>\n"
          "/categorias – elegir departamentos, chollazos y apps iOS gratis\n"
          "/umbral 85 – cambiar el descuento mínimo de aviso\n"
          "/ofertas – ver todas las ofertas de Amazon de ahora mismo\n"
+         "/productos – ver y quitar los productos que sigues\n"
+         "📦 Para seguir un producto, mándame su enlace de Amazon "
+         "(puedes añadir un precio objetivo detrás, por ejemplo: enlace 25)\n"
          "/estado – ver tu configuración actual\n"
          "/diagnostico – comprobar que todo funciona")
 
@@ -318,6 +326,207 @@ def lineas_enlace(o, texto_tienda):
     return lineas
 
 
+# ------------------------- Seguimiento de productos -----------------------
+UA_AMAZON = {"User-Agent": UA, "Accept-Language": "es-ES,es;q=0.9",
+             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+
+
+def asin_de(url):
+    m = re.search(r"/(?:dp|gp/product|gp/aw/d|product|d)/([A-Z0-9]{10})(?:[/?#]|$)", url)
+    return m.group(1) if m else None
+
+
+def precio_texto(t):
+    t = html.unescape(t or "").replace("\xa0", " ")
+    m = re.search(r"\d[\d.,]*", t)
+    return a_numero(m.group()) if m else None
+
+
+def leer_amazon(asin, dominio="www.amazon.es"):
+    """Devuelve (precio, título, motivo_si_falla) leyendo la ficha del producto en Amazon."""
+    url = f"https://{dominio}/dp/{asin}"
+    try:
+        req = urllib.request.Request(url, headers=UA_AMAZON)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            pag = r.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        return None, None, f"Amazon respondió {e.code}"
+    except Exception as e:
+        return None, None, f"error de conexión ({e.__class__.__name__})"
+    if re.search(r"captcha|Robot Check|api-services-support@amazon", pag, re.I) and "productTitle" not in pag:
+        return None, None, "Amazon pide verificación (captcha)"
+    m = re.search(r'id="productTitle"[^>]*>(.*?)</span>', pag, re.S)
+    titulo = limpiar(m.group(1)) if m else None
+    precio = None
+    for patron in (r'id="corePrice[A-Za-z_]*_div".*?class="a-offscreen">([^<]+)<',
+                   r'id="apex_desktop".*?class="a-offscreen">([^<]+)<',
+                   r'"priceAmount"\s*:\s*"?([\d.]+)',
+                   r'id="priceblock_(?:ourprice|dealprice|saleprice)"[^>]*>([^<]+)<',
+                   r'class="a-price-whole">([\d.]+)<.*?class="a-price-fraction">(\d+)<'):
+        m = re.search(patron, pag, re.S)
+        if m:
+            if m.lastindex == 2:
+                precio = a_numero(m.group(1).replace(".", "") + "," + m.group(2))
+            elif patron.startswith('"priceAmount"'):
+                precio = float(m.group(1))
+            else:
+                precio = precio_texto(m.group(1))
+            if precio:
+                break
+    if precio is None:
+        return None, titulo, ("no tiene precio visible (¿agotado o solo de otros vendedores?)"
+                              if titulo else "no he encontrado el producto")
+    return precio, titulo, None
+
+
+def enlace_amazon(asin, dominio="www.amazon.es"):
+    return f"https://{dominio}/dp/{asin}"
+
+
+def extraer_enlace_amazon(texto):
+    m = re.search(r"https?://\S*(?:amazon\.[a-z.]+|amzn\.[a-z]+|a\.co)/\S*", texto, re.I)
+    return m.group(0).rstrip(").,;") if m else None
+
+
+def seguir_producto(estado, texto):
+    seguidos = estado.setdefault("seguidos", {})
+    url = extraer_enlace_amazon(texto)
+    despues = texto.split(url, 1)[1] if url else ""   # el precio objetivo va detrás del enlace
+    m = re.search(r"(\d+(?:[.,]\d{1,2})?)\s*€?", despues)
+    objetivo = a_numero(m.group(1)) if m else None
+    asin = asin_de(url)
+    dominio = urllib.parse.urlparse(url).netloc.lower()
+    if not asin:                                   # enlace corto (amzn.eu, a.co…): lo resuelvo
+        final = resolver(url) or ""
+        asin, dominio = asin_de(final), urllib.parse.urlparse(final).netloc.lower()
+    if not asin:
+        telegram("😕 No he reconocido ese enlace como un producto de Amazon. "
+                 "Ábrelo en Amazon, pulsa <b>Compartir</b> y mándamelo desde ahí.")
+        return
+    if "amazon." not in dominio:
+        dominio = "www.amazon.es"
+    if asin not in seguidos and len(seguidos) >= MAX_SEGUIDOS:
+        telegram(f"Ya sigues {MAX_SEGUIDOS} productos, que es el máximo. Quita alguno con /productos.")
+        return
+    precio, titulo, motivo = leer_amazon(asin, dominio)
+    previo = seguidos.get(asin, {})
+    seguidos[asin] = {
+        "titulo": titulo or previo.get("titulo") or f"Producto {asin}",
+        "dominio": dominio, "objetivo": objetivo,
+        "minimo": precio if precio is not None else previo.get("minimo"),
+        "ultimo": precio, "revisado": time.time(), "avisado": None,
+    }
+    e = html.escape
+    lineas = [("✏️ Actualizado" if previo else "👀 <b>Producto añadido a tu seguimiento</b>"),
+              f'<a href="{enlace_amazon(asin, dominio)}">{e(seguidos[asin]["titulo"][:120])}</a>']
+    if precio is not None:
+        lineas.append(f"💶 Precio ahora: <b>{euros(precio)}</b>")
+    else:
+        lineas.append(f"⚠️ Ahora mismo no he podido leer el precio: {e(motivo)}. "
+                      "Lo seguiré intentando, y también te avisaré si aparece en oferta en Chollometro.")
+    lineas.append(f"🔔 Te avisaré cuando baje a <b>{euros(objetivo)}</b> o menos." if objetivo else
+                  "🔔 Te avisaré cada vez que baje de precio. "
+                  "Si quieres un precio objetivo, mándame el enlace con el precio detrás (ej. enlace 25).")
+    telegram("\n".join(lineas), disable_web_page_preview="true")
+
+
+def texto_productos(estado):
+    seguidos = estado.get("seguidos", {})
+    if not seguidos:
+        return ("📦 <b>No sigues ningún producto todavía.</b>\n"
+                "Mándame el enlace de un producto de Amazon y te avisaré cuando baje de precio.")
+    e = html.escape
+    lineas = [f"📦 <b>Productos que sigues ({len(seguidos)})</b>"]
+    for i, (asin, d) in enumerate(seguidos.items(), 1):
+        precio = euros(d["ultimo"]) if d.get("ultimo") is not None else "precio no disponible"
+        extra = f" · objetivo {euros(d['objetivo'])}" if d.get("objetivo") else ""
+        lineas.append(f'{i}. <a href="{enlace_amazon(asin, d["dominio"])}">{e(d["titulo"][:70])}</a>'
+                      f" — {precio}{extra}")
+    lineas.append("\n<i>Toca ❌ para dejar de seguir un producto.</i>")
+    return "\n".join(lineas)
+
+
+def teclado_productos(estado):
+    filas = [[{"text": f"❌ {i}. {d['titulo'][:30]}", "callback_data": f"d:{asin}"}]
+             for i, (asin, d) in enumerate(estado.get("seguidos", {}).items(), 1)]
+    return {"inline_keyboard": filas}
+
+
+def enviar_productos(estado):
+    telegram(texto_productos(estado), reply_markup=teclado_productos(estado),
+             disable_web_page_preview="true")
+
+
+def comprobar_precios(estado, maximo=6):
+    """Mira el precio de los productos seguidos que toque revisar y avisa de las bajadas."""
+    seguidos = estado.get("seguidos", {})
+    pendientes = sorted((d.get("revisado", 0), asin) for asin, d in seguidos.items()
+                        if time.time() - d.get("revisado", 0) >= REVISION_PRODUCTO)
+    leidos = fallidos = 0
+    for _, asin in pendientes[:maximo]:
+        d = seguidos[asin]
+        precio, titulo, motivo = leer_amazon(asin, d["dominio"])
+        d["revisado"] = time.time()
+        if titulo:
+            d["titulo"] = titulo
+        if precio is None:
+            fallidos += 1
+            print("No se pudo leer", asin, "→", motivo)
+            continue
+        leidos += 1
+        d["ultimo"] = precio
+        minimo = d.get("minimo")
+        objetivo = d.get("objetivo")
+        if objetivo:
+            if precio <= objetivo and (d.get("avisado") is None or precio < d["avisado"]):
+                avisar_bajada(asin, d, minimo or precio, precio, objetivo=True)
+                d["avisado"] = precio
+        elif minimo is not None and precio <= minimo * 0.99:
+            avisar_bajada(asin, d, minimo, precio)
+        if minimo is None or precio < minimo:
+            d["minimo"] = precio
+    if leidos == 0 and fallidos >= 2 and not estado.get("amazon_bloqueado"):
+        estado["amazon_bloqueado"] = True
+        telegram("⚠️ Ahora mismo Amazon no me deja leer los precios. Lo seguiré intentando "
+                 "y, mientras tanto, te avisaré si tus productos aparecen en oferta en Chollometro.")
+    elif leidos and estado.get("amazon_bloqueado"):
+        estado["amazon_bloqueado"] = False
+        telegram("✅ Vuelvo a poder leer los precios de Amazon.")
+
+
+def avisar_bajada(asin, d, antes, ahora, objetivo=False):
+    e = html.escape
+    pct = f" (-{(1 - ahora / antes) * 100:.0f}%)" if antes and antes > ahora else ""
+    cabecera = ("🎯 <b>¡Ha llegado a tu precio objetivo!</b>" if objetivo
+                else "📉 <b>Ha bajado de precio un producto que sigues</b>")
+    telegram("\n".join([
+        cabecera,
+        f"<b>{e(d['titulo'][:150])}</b>",
+        f"💶 {euros(antes)} → <b>{euros(ahora)}</b>{pct}",
+        f'👉 <a href="{enlace_amazon(asin, d["dominio"])}"><b>Abrir en Amazon</b></a>',
+    ]))
+
+
+def avisos_seguidos_en_chollometro(estado, nuevas):
+    """Si un producto que sigues aparece publicado como oferta, avisa aunque Amazon bloquee."""
+    seguidos = estado.get("seguidos", {})
+    if not seguidos:
+        return
+    for o in nuevas:
+        asin = asin_de(enlaces(o)[0])
+        if asin in seguidos:
+            d, (desc, actual) = seguidos[asin], calcular_descuento(o)
+            e = html.escape
+            telegram("\n".join([
+                "🎯 <b>Un producto que sigues está en oferta</b>",
+                f"<b>{e(o['titulo'][:150])}</b>",
+                (f"💶 {euros(actual)}" if actual is not None else "") +
+                (f" (-{desc:.0f}%)" if desc else ""),
+                f'👉 <a href="{enlace_amazon(asin, d["dominio"])}"><b>Abrir en Amazon</b></a>',
+                f'💬 <a href="{e(o["link"], quote=True)}">Ver en Chollometro</a>',
+            ]))
+
+
 # ------------------------------- Apps iOS --------------------------------
 def es_app_ios(o):
     if o["tienda"]:
@@ -435,6 +644,7 @@ def teclado(p):
     filas.append([{"text": f"{marca} 📱 Apps iOS gratis (100%)", "callback_data": "i"}])
     filas.append([{"text": "Marcar todos", "callback_data": "all"},
                   {"text": "Desmarcar todos", "callback_data": "none"}])
+    filas.append([{"text": "📦 Mis productos seguidos", "callback_data": "p"}])
     return {"inline_keyboard": filas}
 
 
@@ -475,6 +685,18 @@ def procesar_telegram(estado, espera=0):
             if str(msg.get("chat", {}).get("id")) != CHAT_ID:
                 continue
             d = cq.get("data", "")
+            if d == "p":
+                tg("answerCallbackQuery", callback_query_id=cq["id"])
+                enviar_productos(estado)
+                continue
+            if d.startswith("d:"):
+                quitado = estado.get("seguidos", {}).pop(d[2:], None)
+                tg("answerCallbackQuery", callback_query_id=cq["id"],
+                   text="🗑️ Ya no lo sigo" if quitado else "Ya estaba quitado")
+                tg("editMessageText", chat_id=CHAT_ID, message_id=msg.get("message_id"),
+                   text=texto_productos(estado), parse_mode="HTML",
+                   disable_web_page_preview="true", reply_markup=teclado_productos(estado))
+                continue
             if d.startswith("c:") and d[2:].isdigit() and int(d[2:]) < len(CATEGORIAS):
                 feed = CATEGORIAS[int(d[2:])][1]
                 p["categorias"][feed] = not p["categorias"][feed]
@@ -509,6 +731,13 @@ def procesar_telegram(estado, espera=0):
                 diagnostico(estado)
             elif cmd == "/ofertas":
                 listar_ofertas(estado)
+            elif cmd in ("/productos", "/seguimiento"):
+                enviar_productos(estado)
+            elif extraer_enlace_amazon(texto):
+                seguir_producto(estado, texto)
+            elif cmd == "/seguir":
+                telegram("Mándame el enlace del producto de Amazon, por ejemplo:\n"
+                         "/seguir https://www.amazon.es/dp/B0XXXXXXX 25")
             elif texto:
                 telegram(AYUDA)
     for mid in menus:
@@ -532,6 +761,11 @@ NOVEDADES = {
     5: ("🆕 <b>Nuevo comando /ofertas</b>\n"
         "Te enseña todas las ofertas de Amazon publicadas ahora mismo, de mayor a menor "
         "descuento, con enlace directo a Amazon."),
+    6: ("🆕 <b>Novedad: sigue productos y te aviso cuando bajen</b>\n"
+        "En la app de Amazon abre un producto, pulsa <b>Compartir → Telegram</b> y elige este bot "
+        "(o pega aquí el enlace). Te avisaré cada vez que baje de precio.\n"
+        "Si quieres un precio objetivo, pon el precio detrás del enlace (ej. <i>enlace 25</i>).\n"
+        "Para verlos o quitarlos: /productos"),
 }
 
 
@@ -549,11 +783,12 @@ def presentar_version(estado):
         {"command": "umbral", "description": "Cambiar el descuento mínimo (ej. /umbral 85)"},
         {"command": "estado", "description": "Ver tu configuración"},
         {"command": "ofertas", "description": "Ver todas las ofertas de Amazon de ahora"},
+        {"command": "productos", "description": "Ver y quitar los productos que sigues"},
         {"command": "diagnostico", "description": "Comprobar que todo funciona"},
     ])
     textos = [t for v, t in sorted(NOVEDADES.items()) if previa < v <= VERSION]
     telegram("\n\n".join(textos))
-    if previa < 4:
+    if previa < 6:
         enviar_menu(preferencias(estado))
     estado["version"] = VERSION
 
@@ -625,6 +860,12 @@ def diagnostico(estado):
         print("Traza del enlace directo:", " -> ".join(traza))
         if es_tienda_final(directo):
             msg.append("Enlace directo a Amazon: ✅ funciona")
+            asin = asin_de(directo)
+            if asin:
+                precio, _, motivo = leer_amazon(asin, urllib.parse.urlparse(directo).netloc)
+                print("Lectura de Amazon:", asin, precio, motivo)
+                msg.append("Lectura de precios en Amazon: " + (f"✅ funciona ({euros(precio)})" if precio
+                           else "⚠️ " + html.escape(motivo or "sin datos")))
         else:
             msg.append("Enlace directo a Amazon: ⚠️ no disponible ("
                        + html.escape(traza[-1] if traza else "?")[:80] + ")")
@@ -691,6 +932,10 @@ def revisar_ofertas(estado):
         estado["iniciado"] = True
     else:
         nuevas = [o for o in de_tienda if o["id"] not in vistos]
+        try:
+            avisos_seguidos_en_chollometro(estado, nuevas)
+        except Exception as ex:
+            print("Error comprobando productos seguidos en Chollometro:", ex)
         if not p["chollazos"]:
             nuevas = [o for o in nuevas if p["categorias"].get(categoria_de(o), True)]
         for o, d, a in analizar(nuevas):
@@ -787,6 +1032,10 @@ def main():
                 revisar_ofertas(estado)
             except Exception as ex:
                 print("Error revisando ofertas:", ex)
+            try:
+                comprobar_precios(estado)
+            except Exception as ex:
+                print("Error comprobando precios:", ex)
             guardar_estado(estado)
             ultimo_feed = time.time()
         if ahora - ultimo_guardado >= 900:
