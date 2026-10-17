@@ -227,6 +227,81 @@ def analizar(lista):
     return resultados
 
 
+# --------------------------- Enlace directo -------------------------------
+class _SinRedirecciones(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_abridor = urllib.request.build_opener(_SinRedirecciones)
+
+
+def es_tienda_final(url):
+    host = urllib.parse.urlparse(url).netloc.lower()
+    return host.startswith("apps.apple.com") or (
+        "amazon." in host and "amzn.to" not in host)
+
+
+def limpiar_destino(url):
+    """Deja el enlace de Amazon en su forma corta /dp/ASIN y quita parámetros a la App Store."""
+    u = urllib.parse.urlparse(url)
+    if "amazon." in u.netloc:
+        m = re.search(r"/(?:dp|gp/product|gp/aw/d|product)/([A-Z0-9]{10})", u.path)
+        if m:
+            return f"https://{u.netloc}/dp/{m.group(1)}"
+    if u.netloc.startswith("apps.apple.com"):
+        return f"https://apps.apple.com{u.path}"
+    return url
+
+
+def enlace_visita(o):
+    m = re.search(r"(\d{4,})/?$", o["link"]) or re.search(r"(\d{4,})", o["id"])
+    if m and "chollometro" in o["link"]:
+        return f"https://www.chollometro.com/visit/threadmain/{m.group(1)}"
+    return None
+
+
+def resolver(url, saltos=6):
+    """Sigue las redirecciones sin llegar a abrir la tienda; devuelve la URL de Amazon/App Store."""
+    for _ in range(saltos):
+        if es_tienda_final(url):
+            return limpiar_destino(url)
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "es-ES,es;q=0.9"})
+        try:
+            with _abridor.open(req, timeout=15) as r:
+                cuerpo = r.read(60000).decode("utf-8", errors="replace")
+            m = (re.search(r'http-equiv=["\']refresh["\'][^>]*url=([^"\'>]+)', cuerpo, re.I)
+                 or re.search(r'location(?:\.href)?\s*=\s*["\']([^"\']+)', cuerpo))
+            if not m:
+                return None
+            url = urllib.parse.urljoin(url, html.unescape(m.group(1)))
+        except urllib.error.HTTPError as e:
+            destino = e.headers.get("Location")
+            if e.code in (301, 302, 303, 307, 308) and destino:
+                url = urllib.parse.urljoin(url, destino)
+            else:
+                return None
+        except Exception:
+            return None
+    return None
+
+
+def enlaces(o):
+    """(enlace directo a la tienda, enlace a Chollometro)."""
+    visita = enlace_visita(o)
+    directo = resolver(visita) if visita else None
+    return directo or visita or o["link"], o["link"]
+
+
+def lineas_enlace(o, texto_tienda):
+    e = html.escape
+    directo, chollometro = enlaces(o)
+    lineas = [f'👉 <a href="{e(directo, quote=True)}"><b>{texto_tienda}</b></a>']
+    if directo != chollometro:
+        lineas.append(f'💬 <a href="{e(chollometro, quote=True)}">Ver en Chollometro</a>')
+    return lineas
+
+
 # ------------------------------- Apps iOS --------------------------------
 def es_app_ios(o):
     if o["tienda"]:
@@ -254,7 +329,7 @@ def formatear_app(o, antes):
     lineas = ["📱 <b>App de iOS GRATIS (-100%)</b>", f"<b>{e(o['titulo'])}</b>"]
     if antes:
         lineas.append(f"💶 Antes {euros(antes)} → ahora GRATIS")
-    lineas.append(f'👉 <a href="{e(o["link"], quote=True)}">Ver oferta</a>')
+    lineas += lineas_enlace(o, "Abrir en la App Store")
     lineas.append("<i>Las apps gratis suelen durar poco: si te interesa, descárgala ya y queda en tu cuenta para siempre.</i>")
     return "\n".join(lineas)
 
@@ -299,7 +374,7 @@ def formatear(o, desc, actual, categoria, chollazo=False):
     lineas = [cabecera, f"<b>{e(o['titulo'])}</b>", f"🏷️ {e(nombre_corto(categoria))}"]
     if actual is not None:
         lineas.append(f"💶 {euros(actual)}")
-    lineas.append(f'👉 <a href="{e(o["link"], quote=True)}">Ver oferta</a>')
+    lineas += lineas_enlace(o, "Abrir en Amazon")
     return "\n".join(lineas)
 
 
@@ -516,6 +591,10 @@ def main():
                f"Umbral de aviso: {p['umbral']:.0f}% · Chollazos: {UMBRAL_CHOLLAZOS:.0f}%",
                "Por departamento: " + html.escape(", ".join(
                    f"{c} {n}" for c, n in sorted(por_cat.items(), key=lambda x: -x[1])))]
+        if de_tienda:
+            directo, _ = enlaces(de_tienda[0])
+            msg.append("Enlace directo a Amazon: " + ("✅ funciona" if es_tienda_final(directo)
+                       else "⚠️ no disponible, se usará la redirección de Chollometro"))
         if errores:
             msg.append("Fuentes con error: " + html.escape("; ".join(errores))[:400])
         if con_desc:
