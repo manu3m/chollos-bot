@@ -36,7 +36,7 @@
 "prefs": {
 "categorias": {
 "Electrónica": true,
-"Gaming": true,
+"Gaming": false,
 "Hogar, vivienda y oficina": true,
 "Jardín y bricolaje": false,
 "Juguetes, familia e hijos": true,
@@ -52,6 +52,6 @@
 "umbral": 80.0,
 "apps_ios": true
 },
-"tg_offset": 253496480,
+"tg_offset": 253496481,
 "version": 4
 }
