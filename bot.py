@@ -536,7 +536,7 @@ def avisos_seguidos_en_chollometro(estado, nuevas):
                 f"<b>{e(o['titulo'][:300])}</b>",
                 (f"💶 {euros(actual)}" if actual is not None else "") +
                 (f" (-{desc:.0f}%)" if desc else ""),
-            ]), o.get("imagen"), [{"text": "🛒 Abrir en Amazon", "url": enlace_amazon(asin, d["dominio"])},
+            ]), imagen_producto(o), [{"text": "🛒 Abrir en Amazon", "url": enlace_amazon(asin, d["dominio"])},
                                  {"text": "💬 Ver en Chollometro", "url": o["link"]}])
 
 
@@ -568,7 +568,7 @@ def avisar_app(o, antes):
     if antes:
         lineas.append(f"💶 Antes {euros(antes)} → ahora GRATIS")
     lineas.append("<i>Las apps gratis suelen durar poco: si te interesa, descárgala ya y queda en tu cuenta para siempre.</i>")
-    enviar("\n".join(lineas), o.get("imagen"), botones_oferta(o, "📲 Abrir en la App Store"))
+    enviar("\n".join(lineas), imagen_producto(o), botones_oferta(o, "📲 Abrir en la App Store"))
 
 
 # ------------------------------- Telegram --------------------------------
@@ -613,6 +613,27 @@ def enviar(texto, imagen=None, botones=None):
     return telegram(texto, disable_web_page_preview="true", **extra)
 
 
+def imagen_producto(o):
+    """Foto del producto. Si el RSS solo trae el logo de la tienda, la busca en la página de la oferta."""
+    img = o.get("imagen") or ""
+    if img and "/merchants/" not in img:
+        return img
+    m = re.search(r"(\d{4,})/?$", o["link"])
+    if not m or "chollometro" not in o["link"]:
+        return None
+    try:
+        pag = descargar(o["link"]).replace("\\/", "/").replace("&amp;", "&")
+    except Exception:
+        return None
+    fotos = re.findall(r"https://static\.chollometro\.com/threads/raw/[A-Za-z0-9]+/" + m.group(1) +
+                       r"_\d+/[^\"'\s)]+?\.(?:jpe?g|png|webp)", pag)
+    if not fotos:
+        o["imagen"] = ""
+        return None
+    o["imagen"] = ([f for f in fotos if "/768x768/" in f] or fotos)[0]
+    return o["imagen"]
+
+
 def botones_oferta(o, texto_tienda="🛒 Abrir en Amazon"):
     directo, chollometro = enlaces(o)
     botones = [{"text": texto_tienda, "url": directo}]
@@ -632,7 +653,7 @@ def avisar_oferta(o, desc, actual, categoria, chollazo=False):
     lineas = [cabecera, f"<b>{e(o['titulo'][:300])}</b>", f"🏷️ {e(nombre_corto(categoria))}"]
     if actual is not None:
         lineas.append(f"💶 {euros(actual)}")
-    enviar("\n".join(lineas), o.get("imagen"), botones_oferta(o))
+    enviar("\n".join(lineas), imagen_producto(o), botones_oferta(o))
 
 
 # ------------------------- Preferencias y menú ---------------------------
@@ -956,7 +977,7 @@ def listar_ofertas(estado, todas=False):
             cabecera = " · ".join(x for x in (f"<b>-{d:.0f}%</b>" if d is not None else "",
                                                 f"<b>{euros(a)}</b>" if a is not None else "") if x)
             texto = (cabecera + "\n" if cabecera else "") + html.escape(o["titulo"][:300])
-            enviar(texto, o.get("imagen"), botones_oferta(o))
+            enviar(texto, imagen_producto(o), botones_oferta(o))
             enviadas += 1
 
 
