@@ -57,7 +57,10 @@ CATEGORIAS = [
     ("Coches y motos", "Coches y motos"),
     ("Otras", "Otras"),
 ]
-VERSION = 8
+VERSION = 9
+MURO = Path(__file__).with_name("ofertas.json")   # datos del muro de ofertas (página web)
+MURO_HORAS = 48
+MURO_MAX = 150
 MAX_SEGUIDOS = 40
 REVISION_PRODUCTO = 6 * 3600   # cada cuánto se reintenta leer el precio en Amazon (suele bloquear)
 DURACION = int(os.environ.get("DURACION_MIN") or 330) * 60   # cuánto dura cada tanda
@@ -76,7 +79,7 @@ PALABRAS_ANTES = (r"(?:antes|pvpr?|p\.v\.p\.?r?\.?|precio\s(?:anterior|habitual|
 AYUDA = ("🤖 <b>Comandos</b>\n"
          "/categorias – elegir departamentos, chollazos y apps iOS gratis\n"
          "/umbral 85 – cambiar el descuento mínimo de aviso\n"
-         "/ofertas – ver todas las ofertas de Amazon de ahora mismo\n"
+         "/ofertas – muro con todas las ofertas de Amazon (con foto)\n"
          "/productos – ver y quitar los productos que sigues\n"
          "📦 Para seguir un producto, mándame su enlace de Amazon "
          "(puedes añadir un precio objetivo detrás, por ejemplo: enlace 25)\n"
@@ -615,8 +618,11 @@ def enviar(texto, imagen=None, botones=None):
 
 def imagen_producto(o):
     """Foto del producto. Si el RSS solo trae el logo de la tienda, la busca en la página de la oferta."""
+    if o["id"] in _cache_imagenes:
+        return _cache_imagenes[o["id"]]
     img = o.get("imagen") or ""
     if img and "/merchants/" not in img:
+        _cache_imagenes[o["id"]] = img
         return img
     m = re.search(r"(\d{4,})/?$", o["link"])
     if not m or "chollometro" not in o["link"]:
@@ -627,11 +633,75 @@ def imagen_producto(o):
         return None
     fotos = re.findall(r"https://static\.chollometro\.com/threads/raw/[A-Za-z0-9]+/" + m.group(1) +
                        r"_\d+/[^\"'\s)]+?\.(?:jpe?g|png|webp)", pag)
-    if not fotos:
-        o["imagen"] = ""
-        return None
-    o["imagen"] = ([f for f in fotos if "/768x768/" in f] or fotos)[0]
-    return o["imagen"]
+    o["imagen"] = ([f for f in fotos if "/768x768/" in f] or fotos)[0] if fotos else ""
+    _cache_imagenes[o["id"]] = o["imagen"] or None
+    return _cache_imagenes[o["id"]]
+
+
+_cache_imagenes = {}
+
+
+_muro = None
+
+
+def url_muro(p=None):
+    repo = os.environ.get("GITHUB_REPOSITORY", "manu3m/chollos-bot")
+    dueno, nombre = repo.split("/", 1)
+    url = os.environ.get("URL_MURO") or f"https://{dueno.lower()}.github.io/{nombre}/"
+    if p:
+        activas = [c for c, f in CATEGORIAS if p["categorias"].get(f, True)]
+        if len(activas) < len(CATEGORIAS):
+            url += "?cats=" + urllib.parse.quote(",".join(activas + ["Apps iOS gratis"] * p.get("apps_ios", True)))
+    return url
+
+
+def actualizar_muro(de_tienda, apps):
+    """Mantiene ofertas.json con las ofertas de Amazon de las últimas horas para la página del muro."""
+    global _muro
+    if _muro is None:
+        try:
+            _muro = {o["id"]: o for o in json.loads(MURO.read_text(encoding="utf-8"))["ofertas"]}
+        except Exception:
+            _muro = {}
+    ahora, cambiado = time.time(), False
+    for o, es_app in [(x, False) for x in de_tienda] + [(x, True) for x in apps]:
+        if o["id"] in _muro:
+            continue
+        if es_app:
+            desc, precio = 100.0, 0.0
+        else:
+            desc, precio = calcular_descuento(o)
+            if desc is None:
+                desc, p2 = descuento_desde_pagina(o)
+                precio = precio if precio is not None else p2
+        _muro[o["id"]] = {
+            "id": o["id"], "t": o["titulo"][:200],
+            "c": "Apps iOS gratis" if es_app else nombre_corto(categoria_de(o)),
+            "d": desc, "p": precio, "i": imagen_producto(o) or "",
+            "u": enlaces(o)[0], "ch": o["link"], "f": int(ahora),
+        }
+        cambiado = True
+    for k in [k for k, v in _muro.items() if v["f"] < ahora - MURO_HORAS * 3600]:
+        del _muro[k]
+        cambiado = True
+    if len(_muro) > MURO_MAX:
+        for k in sorted(_muro, key=lambda k: _muro[k]["f"])[:len(_muro) - MURO_MAX]:
+            del _muro[k]
+        cambiado = True
+    if cambiado or not MURO.exists():
+        MURO.write_text(json.dumps({"actualizado": int(ahora), "ofertas": list(_muro.values())},
+                                   ensure_ascii=False), encoding="utf-8")
+
+
+def enviar_muro(estado):
+    p = preferencias(estado)
+    n = len(_muro or {})
+    telegram("🛍️ <b>Muro de ofertas</b>\n"
+             + (f"{n} productos de Amazon de las últimas {MURO_HORAS} horas, con foto y por departamentos. "
+                if n else "Las ofertas de Amazon de las últimas horas, con foto y por departamentos. ")
+             + "Toca un producto para abrirlo en Amazon.",
+             reply_markup={"inline_keyboard": [[{"text": "🛍️ Abrir el muro de ofertas",
+                                                 "web_app": {"url": url_muro(p)}}]]})
 
 
 def botones_oferta(o, texto_tienda="🛒 Abrir en Amazon"):
@@ -782,7 +852,10 @@ def procesar_telegram(estado, espera=0):
             elif cmd == "/diagnostico":
                 diagnostico(estado)
             elif cmd == "/ofertas":
-                listar_ofertas(estado, todas="todas" in texto.lower())
+                if re.search(r"lista|mensajes", texto, re.I):
+                    listar_ofertas(estado, todas="todas" in texto.lower())
+                else:
+                    enviar_muro(estado)
             elif cmd in ("/productos", "/seguimiento"):
                 enviar_productos(estado)
             elif extraer_enlace_amazon(texto):
@@ -796,6 +869,9 @@ def procesar_telegram(estado, espera=0):
         if mid:
             tg("editMessageText", chat_id=CHAT_ID, message_id=mid, text=texto_menu(p),
                parse_mode="HTML", reply_markup=teclado(p))
+    if menus:
+        tg("setChatMenuButton", chat_id=CHAT_ID, menu_button={
+            "type": "web_app", "text": "Ofertas", "web_app": {"url": url_muro(p)}})
     estado["tg_offset"] = offset
     return True
 
@@ -823,6 +899,10 @@ NOVEDADES = {
         "/ofertas ahora te las enseña agrupadas por departamento, con la foto de cada producto "
         "y un botón para abrirlo en Amazon. Solo salen tus departamentos marcados; "
         "para verlas todas escribe /ofertas todas."),
+    9: ("🆕 <b>Muro de ofertas</b>\n"
+        "Ahora las ofertas se ven en un muro de fotos: toca el botón <b>Ofertas</b> que tienes al lado "
+        "del cuadro de escribir (o escribe /ofertas). Puedes filtrar por departamento y ordenarlas, "
+        "y al tocar un producto se abre directamente en Amazon."),
 }
 
 
@@ -839,7 +919,7 @@ def presentar_version(estado):
         {"command": "categorias", "description": "Elegir departamentos, chollazos y apps iOS"},
         {"command": "umbral", "description": "Cambiar el descuento mínimo (ej. /umbral 85)"},
         {"command": "estado", "description": "Ver tu configuración"},
-        {"command": "ofertas", "description": "Ver todas las ofertas de Amazon de ahora"},
+        {"command": "ofertas", "description": "Muro con las ofertas de Amazon (con foto)"},
         {"command": "productos", "description": "Ver y quitar los productos que sigues"},
         {"command": "diagnostico", "description": "Comprobar que todo funciona"},
     ])
@@ -849,7 +929,8 @@ def presentar_version(estado):
     telegram("\n\n".join(textos))
     if previa < 6:
         enviar_menu(preferencias(estado))
-    # (a partir de la versión 8 el menú no cambia, no hace falta reenviarlo)
+    tg("setChatMenuButton", chat_id=CHAT_ID, menu_button={
+        "type": "web_app", "text": "Ofertas", "web_app": {"url": url_muro(preferencias(estado))}})
     estado["version"] = VERSION
 
 
@@ -998,6 +1079,10 @@ def revisar_ofertas(estado):
 
     de_tienda = [o for o in ofertas if es_de_tienda(o) and not excluido(o)]
     apps = [o for o in ofertas if es_app_ios(o) and es_gratis(o)]
+    try:
+        actualizar_muro(de_tienda, apps)
+    except Exception as ex:
+        print("Error actualizando el muro:", ex)
 
     if not estado.get("iniciado"):
         telegram(f"✅ <b>Bot activado</b>\nHe leído {len(ofertas)} ofertas "
@@ -1046,6 +1131,8 @@ def git_guardar():
     git("config", "user.name", "bot-chollos")
     git("config", "user.email", "bot-chollos@users.noreply.github.com")
     git("add", "vistos.json")
+    if MURO.exists():
+        git("add", "ofertas.json")
     if git("diff", "--staged", "--quiet").returncode == 0:
         return
     git("commit", "-q", "-m", "Actualiza estado")
