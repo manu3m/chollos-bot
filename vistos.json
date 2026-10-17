@@ -43,7 +43,7 @@
 "Moda y accesorios": true,
 "Salud y belleza": true,
 "Supermercado y alimentación": true,
-"Deportes y aire libre": true,
+"Deportes y aire libre": false,
 "Cine, libros, cultura y ocio": true,
 "Coches y motos": false,
 "Otras": true
@@ -52,6 +52,6 @@
 "umbral": 80.0,
 "apps_ios": true
 },
-"tg_offset": 253496476,
+"tg_offset": 253496477,
 "version": 4
 }
