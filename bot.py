@@ -4,7 +4,8 @@ Bot de alertas de chollos de Amazon -> Telegram, con filtro por categorías.
 
 Lee las ofertas nuevas de Chollometro, se queda con las de Amazon y avisa:
   - de las que superen tu umbral (80 % por defecto) en las categorías que elijas;
-  - de los "chollazos" (95 % o más) de cualquier categoría, si los tienes activados.
+  - de los "chollazos" (95 % o más) de cualquier categoría, si los tienes activados;
+  - de las apps de iOS que se pongan gratis (100 %) en la App Store, si lo activas.
 Las categorías y el umbral se cambian desde Telegram con /categorias y /umbral.
 Pensado para ejecutarse gratis cada 5 minutos con GitHub Actions.
 """
@@ -50,7 +51,7 @@ CATEGORIAS = [
     ("Coches y motos", "Coches y motos"),
     ("Otras", "Otras"),
 ]
-VERSION = 2
+VERSION = 3
 
 ESTADO = Path(__file__).with_name("vistos.json")
 MAX_VISTOS = 3000
@@ -63,7 +64,7 @@ PALABRAS_ANTES = (r"(?:antes|pvpr?|p\.v\.p\.?r?\.?|precio\s(?:anterior|habitual|
                   r"sin\sdescuento)")
 
 AYUDA = ("🤖 <b>Comandos</b>\n"
-         "/categorias – elegir departamentos y chollazos\n"
+         "/categorias – elegir departamentos, chollazos y apps iOS gratis\n"
          "/umbral 85 – cambiar el descuento mínimo de aviso\n"
          "/estado – ver tu configuración actual\n\n"
          "Reviso Telegram cada 5 minutos, así que te respondo en unos minutos.")
@@ -194,16 +195,21 @@ def calcular_descuento(o):
     return (max(candidatos) if candidatos else None), actual
 
 
-def descuento_desde_pagina(o):
-    """Plan B: abre la página de la oferta y busca precio y precio anterior."""
+def precios_pagina(o):
+    """Abre la página de la oferta y devuelve (precio actual, precio anterior)."""
     try:
         pag = html.unescape(descargar(o["link"]))
     except Exception:
         return None, None
     m_act = re.search(r'"price"\s*:\s*"?(\d+(?:\.\d+)?)', pag)
     m_ant = re.search(r'"nextBestPrice"\s*:\s*"?(\d+(?:\.\d+)?)', pag)
-    actual = float(m_act.group(1)) if m_act else None
-    antes = float(m_ant.group(1)) if m_ant else None
+    return (float(m_act.group(1)) if m_act else None,
+            float(m_ant.group(1)) if m_ant else None)
+
+
+def descuento_desde_pagina(o):
+    """Plan B: calcula el descuento con los precios de la página de la oferta."""
+    actual, antes = precios_pagina(o)
     if actual is not None and antes and antes > actual:
         return round((1 - actual / antes) * 100, 1), actual
     return None, actual
@@ -219,6 +225,38 @@ def analizar(lista):
             actual = actual if actual is not None else act2
         resultados.append((o, desc, actual))
     return resultados
+
+
+# ------------------------------- Apps iOS --------------------------------
+def es_app_ios(o):
+    if o["tienda"]:
+        return "app store" in o["tienda"].lower()
+    texto = f"{o['titulo']} {o['texto']}".lower()
+    return bool(re.search(r"\bios\b|iphone|ipad", o["titulo"], re.I)) and "app store" in texto
+
+
+def es_gratis(o):
+    if o["precio"] == 0:
+        return True
+    return bool(re.search(r"\bgratis\b|-\s?100\s?%|\bfree\b", o["titulo"], re.I))
+
+
+def precio_anterior(o):
+    for m in re.finditer(PALABRAS_ANTES + r"[:\s]*(\d[\d.,]*)\s?€", f"{o['titulo']} {o['texto']}", re.I):
+        v = a_numero(m.group(1))
+        if v:
+            return v
+    return precios_pagina(o)[1]
+
+
+def formatear_app(o, antes):
+    e = html.escape
+    lineas = ["📱 <b>App de iOS GRATIS (-100%)</b>", f"<b>{e(o['titulo'])}</b>"]
+    if antes:
+        lineas.append(f"💶 Antes {euros(antes)} → ahora GRATIS")
+    lineas.append(f'👉 <a href="{e(o["link"], quote=True)}">Ver oferta</a>')
+    lineas.append("<i>Las apps gratis suelen durar poco: si te interesa, descárgala ya y queda en tu cuenta para siempre.</i>")
+    return "\n".join(lineas)
 
 
 # ------------------------------- Telegram --------------------------------
@@ -272,6 +310,7 @@ def preferencias(estado):
     for _, feed in CATEGORIAS:
         cats.setdefault(feed, True)
     p.setdefault("chollazos", True)
+    p.setdefault("apps_ios", True)
     p.setdefault("umbral", DESCUENTO_MIN)
     return p
 
@@ -282,7 +321,8 @@ def texto_menu(p):
             f"🔥 <b>Avisos normales:</b> descuento del {p['umbral']:.0f}% o más, "
             "solo en los departamentos marcados.\n"
             f"💥 <b>Chollazos:</b> descuento del {UMBRAL_CHOLLAZOS:.0f}% o más, "
-            "de cualquier departamento (aunque esté desmarcado).\n\n"
+            "de cualquier departamento (aunque esté desmarcado).\n"
+            "📱 <b>Apps iOS gratis:</b> apps de la App Store que pasan a costar 0 €.\n\n"
             "<i>Los cambios se aplican en unos minutos.</i>")
 
 
@@ -299,6 +339,8 @@ def teclado(p):
     marca = "✅" if p["chollazos"] else "⬜"
     filas.append([{"text": f"{marca} 💥 Chollazos ≥{UMBRAL_CHOLLAZOS:.0f}%",
                    "callback_data": "x"}])
+    marca = "✅" if p["apps_ios"] else "⬜"
+    filas.append([{"text": f"{marca} 📱 Apps iOS gratis (100%)", "callback_data": "i"}])
     filas.append([{"text": "Marcar todos", "callback_data": "all"},
                   {"text": "Desmarcar todos", "callback_data": "none"}])
     return {"inline_keyboard": filas}
@@ -313,6 +355,7 @@ def resumen(p):
     return ("📋 <b>Tu configuración</b>\n"
             f"Umbral de aviso: {p['umbral']:.0f}%\n"
             f"Chollazos (≥{UMBRAL_CHOLLAZOS:.0f}%): {'activados' if p['chollazos'] else 'desactivados'}\n"
+            f"Apps iOS gratis: {'activadas' if p['apps_ios'] else 'desactivadas'}\n"
             f"Departamentos: {', '.join(activas) if activas else 'ninguno'}")
 
 
@@ -340,6 +383,8 @@ def procesar_telegram(estado):
                 p["categorias"][feed] = not p["categorias"][feed]
             elif d == "x":
                 p["chollazos"] = not p["chollazos"]
+            elif d == "i":
+                p["apps_ios"] = not p["apps_ios"]
             elif d in ("all", "none"):
                 for _, feed in CATEGORIAS:
                     p["categorias"][feed] = d == "all"
@@ -372,18 +417,27 @@ def procesar_telegram(estado):
     estado["tg_offset"] = offset
 
 
+NOVEDADES = {
+    2: ("🆕 <b>Novedad: filtro por departamentos</b>\n"
+        "Ahora puedes elegir de qué departamentos quieres avisos, y recibir "
+        f"siempre los chollazos de más del {UMBRAL_CHOLLAZOS:.0f}%."),
+    3: ("🆕 <b>Novedad: apps de iOS gratis</b>\n"
+        "Te avisaré cuando una app de pago de la App Store se ponga gratis (-100%). "
+        "Puedes desactivarlo en el menú con el botón 📱."),
+}
+
+
 def presentar_version(estado):
-    if estado.get("version", 1) >= VERSION or not TOKEN or not CHAT_ID:
+    previa = estado.get("version", 1)
+    if previa >= VERSION or not TOKEN or not CHAT_ID:
         return
     tg("setMyCommands", commands=[
-        {"command": "categorias", "description": "Elegir departamentos y chollazos"},
+        {"command": "categorias", "description": "Elegir departamentos, chollazos y apps iOS"},
         {"command": "umbral", "description": "Cambiar el descuento mínimo (ej. /umbral 85)"},
         {"command": "estado", "description": "Ver tu configuración"},
     ])
-    telegram("🆕 <b>Novedad: filtro por departamentos</b>\n"
-             "Ahora puedes elegir de qué departamentos quieres avisos, y recibir "
-             "siempre los chollazos de más del "
-             f"{UMBRAL_CHOLLAZOS:.0f}%. Escribe /categorias cuando quieras cambiarlo.")
+    textos = [t for v, t in sorted(NOVEDADES.items()) if previa < v <= VERSION]
+    telegram("\n\n".join(textos) + "\n\nEscribe /categorias cuando quieras cambiar tus filtros.")
     enviar_menu(preferencias(estado))
     estado["version"] = VERSION
 
@@ -444,6 +498,7 @@ def main():
         estado["fallando"] = False
 
     de_tienda = [o for o in ofertas if es_de_tienda(o) and not excluido(o)]
+    apps = [o for o in ofertas if es_app_ios(o) and es_gratis(o)]
 
     if MODO == "diagnostico":
         res = analizar(de_tienda)
@@ -457,6 +512,7 @@ def main():
                f"Ofertas leídas: {len(ofertas)}",
                f"De {TIENDA.capitalize()}: {len(de_tienda)}",
                f"Con descuento detectado: {len(con_desc)}",
+               f"Apps iOS gratis ahora: {len(apps)}",
                f"Umbral de aviso: {p['umbral']:.0f}% · Chollazos: {UMBRAL_CHOLLAZOS:.0f}%",
                "Por departamento: " + html.escape(", ".join(
                    f"{c} {n}" for c, n in sorted(por_cat.items(), key=lambda x: -x[1])))]
@@ -488,6 +544,10 @@ def main():
                 telegram(formatear(o, d, a, cat, chollazo=True))
             elif p["categorias"].get(cat, True) and d >= p["umbral"]:
                 telegram(formatear(o, d, a, cat))
+        if p["apps_ios"]:
+            for o in apps:
+                if o["id"] not in vistos:
+                    telegram(formatear_app(o, precio_anterior(o)))
 
     for o in ofertas:
         if o["id"] not in vistos:
