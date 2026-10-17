@@ -1,5 +1,25 @@
 {
 "vistos": [],
 "fallando": false,
-"iniciado": false
+"iniciado": false,
+"prefs": {
+"categorias": {
+"Electrónica": true,
+"Gaming": true,
+"Hogar, vivienda y oficina": true,
+"Jardín y bricolaje": true,
+"Juguetes, familia e hijos": true,
+"Moda y accesorios": true,
+"Salud y belleza": true,
+"Supermercado y alimentación": true,
+"Deportes y aire libre": true,
+"Cine, libros, cultura y ocio": true,
+"Coches y motos": true,
+"Otras": true
+},
+"chollazos": true,
+"umbral": 80.0
+},
+"tg_offset": 0,
+"version": 2
 }
