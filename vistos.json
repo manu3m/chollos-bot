@@ -76,6 +76,17 @@
 "umbral": 80.0,
 "apps_ios": true
 },
-"tg_offset": 253496496,
-"version": 8
+"tg_offset": 253496497,
+"version": 8,
+"seguidos": {
+"B0943ZY29Z": {
+"titulo": "Producto B0943ZY29Z",
+"dominio": "www.amazon.es",
+"objetivo": 1070.0,
+"minimo": null,
+"ultimo": null,
+"revisado": 1792242612.474686,
+"avisado": null
+}
+}
 }
