@@ -1,0 +1,42 @@
+name: Alertas chollos Amazon
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # cada 15 minutos
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "normal o diagnostico"
+        default: "diagnostico"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: alertas-chollos
+  cancel-in-progress: false
+
+jobs:
+  vigilar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Buscar chollos
+        run: python3 bot.py
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DESCUENTO_MIN: ${{ vars.DESCUENTO_MIN }}
+          EXCLUIR: ${{ vars.EXCLUIR }}
+          FEEDS: ${{ vars.FEEDS }}
+          MODO: ${{ github.event.inputs.modo || 'normal' }}
+
+      - name: Guardar ofertas ya vistas
+        if: always()
+        run: |
+          git config user.name "bot-chollos"
+          git config user.email "bot-chollos@users.noreply.github.com"
+          git add vistos.json 2>/dev/null || exit 0
+          git diff --staged --quiet || (git commit -m "Actualiza ofertas vistas" && git push)
