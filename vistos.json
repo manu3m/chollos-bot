@@ -1,9 +1,5 @@
 {
 "vistos": [
-"https://www.chollometro.com/ofertas/chaqueta-de-saten-heavyweight-los-angeles-lakers-mitchell-ness-morado-hombre-2065498",
-"https://www.chollometro.com/ofertas/nike-mens-barcelona-regular-fit-track-jacket-2065506",
-"https://www.chollometro.com/ofertas/homcom-alacena-de-cocina-alta-con-4-puertas-compartimentos-abiertos-desde-espana-2065504",
-"https://www.chollometro.com/ofertas/camara-exterior-1080p-2mp-con-vision-nocturna-a-color-ideal-para-vigilancia-y-seguridad-en-exteriores-2065502",
 "https://www.chollometro.com/ofertas/zapatillas-asics-nimbus-28-mujer-maxima-amortiguacion-ff-blast-eco-puregel-running-en-app-2065500",
 "https://www.chollometro.com/ofertas/delta-cafes-colombia-cafe-origen-colombia-molido-natural-220-g-2065507",
 "https://www.chollometro.com/ofertas/cama-de-camping-plegable-de-aluminio-190x62x42cm-2065505",
@@ -2999,7 +2995,11 @@
 "https://www.chollometro.com/ofertas/sofa-tapizado-con-chaiselongue-derecha-nido-el-corte-ingles-antracita-250-cm-2069543",
 "https://www.chollometro.com/ofertas/victorinox-nail-clipper-cortaunas-con-2-funciones-cortaunas-y-agujero-para-colgar-un-cordon-de-color-rojo-2069546",
 "https://www.chollometro.com/ofertas/juego-de-mesa-de-cartas-zampabollos-de-2-a-5-jugadores-partidas-de-15-aprende-en-menos-de-1-2069545",
-"https://www.chollometro.com/ofertas/zapatillas-adidas-adizero-boston-13-2069548"
+"https://www.chollometro.com/ofertas/zapatillas-adidas-adizero-boston-13-2069548",
+"https://www.chollometro.com/ofertas/black-decker-radiador-mural-de-ceramica-1000-2000-w-2069550",
+"https://www.chollometro.com/ofertas/dr-scholl-cortaunas-pies-y-manos-con-deposito-2069549",
+"https://www.chollometro.com/ofertas/taurus-radiador-electrico-tropic-up-down-2000-w-2069552",
+"https://www.chollometro.com/ofertas/aureole-wings-of-hope-celestial-edition-2069551"
 ],
 "fallando": false,
 "iniciado": true,
@@ -3031,7 +3031,7 @@
 "objetivo": 1070.0,
 "minimo": null,
 "ultimo": null,
-"revisado": 1794677344.2830179,
+"revisado": 1794699116.928633,
 "avisado": null
 }
 }
