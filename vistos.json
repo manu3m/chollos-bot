@@ -1,6 +1,5 @@
 {
 "vistos": [
-"https://www.chollometro.com/ofertas/philips-serie-7000-afeitadora-electrica-maquina-de-afeitar-2078476",
 "https://www.chollometro.com/ofertas/super-mario-la-pelicula-puzzle-ninos-9-anos-300-piezas-xxl-2078472",
 "https://www.chollometro.com/ofertas/alpi-nature-calendario-de-adviento-de-te-2026-regalo-de-te-navideno-2078479",
 "https://www.chollometro.com/ofertas/puzzle-navideno-1000-piezas-70x50cm-2078477",
@@ -2999,7 +2998,8 @@
 "https://www.chollometro.com/ofertas/altavoz-wifi-samsung-music-studio-7-ls70h-con-dolby-atmos-true-311ch-2026-2082512",
 "https://www.chollometro.com/ofertas/calefactor-electrico-fm-calefaccion-alfa-900-2-potencias-resistencia-blindada-gris-2082511",
 "https://www.chollometro.com/ofertas/novablast-5-comprando-dos-pares-por-7560eur-2082509",
-"https://www.chollometro.com/ofertas/guantes-desechables-de-nitrilo-azules-sin-polvo-sin-latex-varias-tallas-paquete-de-100-2082508"
+"https://www.chollometro.com/ofertas/guantes-desechables-de-nitrilo-azules-sin-polvo-sin-latex-varias-tallas-paquete-de-100-2082508",
+"https://www.chollometro.com/ofertas/orico-lector-de-tarjetas-sd-magnetico-con-carga-pd-100w-2082529"
 ],
 "fallando": false,
 "iniciado": true,
@@ -3031,7 +3031,7 @@
 "objetivo": 1070.0,
 "minimo": 1699.0,
 "ultimo": 1699.0,
-"revisado": 1795244672.8655896,
+"revisado": 1795266463.0437899,
 "avisado": null
 }
 }
